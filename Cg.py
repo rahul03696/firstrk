@@ -1339,6 +1339,187 @@ def _extract_text_responses(
 
 
 # ============================================================
+# OMR IDENTITY EXTRACTION
+# ============================================================
+
+
+def _normalize_identity_name(value):
+    """Normalize OCR name text for cross-sheet comparison."""
+    if not value:
+        return ""
+
+    value = str(value).upper()
+    value = re.sub(r"[^A-Z0-9 ]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _normalize_roll_number(value):
+    """Keep only digits so OCR punctuation/spaces do not break matching."""
+    if not value:
+        return ""
+    return re.sub(r"\D", "", str(value))
+
+
+def _ocr_identity_text(image):
+    """Run several OCR passes because OMR identity fields may be faint."""
+    if pytesseract is None or image is None:
+        return ""
+
+    texts = []
+    rgb = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+    variants = [
+        (image, "--psm 6"),
+        (image, "--psm 11"),
+        (Image.fromarray(gray), "--psm 6"),
+    ]
+
+    # Add a thresholded pass for light/handwritten text.
+    _, thresholded = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    variants.append((Image.fromarray(thresholded), "--psm 6"))
+
+    for variant, config in variants:
+        try:
+            text = pytesseract.image_to_string(variant, config=config)
+            if text and text.strip():
+                texts.append(text)
+        except Exception:
+            pass
+
+    return "\n".join(texts)
+
+
+def _extract_roll_from_ocr(text):
+    """Extract a roll/registration number from OCR text near an identity label."""
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    label_pattern = re.compile(
+        r"(?:ROLL(?:\s*(?:NO|NUMBER))?|REG(?:ISTRATION)?(?:\s*NO|\s*NUMBER)?)",
+        re.I,
+    )
+
+    # Prefer digits on the same line as Roll/Registration.
+    for line in lines:
+        if label_pattern.search(line):
+            digits = re.findall(r"\d{4,12}", line)
+            if digits:
+                return _normalize_roll_number(digits[-1])
+
+    # Fallback: OCR may split the label and number onto adjacent lines.
+    for i, line in enumerate(lines):
+        if label_pattern.search(line):
+            for candidate in lines[i:i + 3]:
+                digits = re.findall(r"\d{4,12}", candidate)
+                if digits:
+                    return _normalize_roll_number(digits[-1])
+
+    # Last-resort: use a standalone 4-12 digit token, but only when unique.
+    all_digits = re.findall(r"\b\d{4,12}\b", text)
+    unique_digits = list(dict.fromkeys(_normalize_roll_number(x) for x in all_digits))
+    if len(unique_digits) == 1:
+        return unique_digits[0]
+
+    return ""
+
+
+def _extract_name_from_ocr(text):
+    """Extract candidate name from OCR text near a Name/Candidate Name label."""
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    label_pattern = re.compile(
+        r"(?:CANDIDATE\s+)?NAME(?:\s*OF\s*CANDIDATE)?",
+        re.I,
+    )
+
+    for i, line in enumerate(lines):
+        match = label_pattern.search(line)
+        if not match:
+            continue
+
+        # Text after the label on the same line.
+        value = line[match.end():].strip(" :-_=|\t")
+        value = re.sub(r"^(?:MR|MS|MRS|MISS)\.?\s+", "", value, flags=re.I)
+        value = re.sub(r"[^A-Za-z .'-]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
+            return _normalize_identity_name(value)
+
+        # Or the value may be on the following line.
+        if i + 1 < len(lines):
+            value = lines[i + 1]
+            value = re.sub(r"[^A-Za-z .'-]", " ", value)
+            value = re.sub(r"\s+", " ", value).strip()
+            if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
+                return _normalize_identity_name(value)
+
+    return ""
+
+
+def extract_omr_identity(uploaded_file):
+    """Extract the name and roll number printed/written on one OMR file."""
+    if uploaded_file is None:
+        return {"name": "", "roll_no": "", "raw_ocr": ""}
+
+    file_bytes = uploaded_file.getvalue()
+    file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
+    images = []
+    extracted_text = ""
+
+    try:
+        if file_ext in ["jpg", "jpeg", "png"]:
+            images = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
+
+        elif file_ext == "pdf":
+            if pdfplumber is not None:
+                try:
+                    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                        for page in pdf.pages:
+                            page_text = page.extract_text()
+                            if page_text:
+                                extracted_text += page_text + "\n"
+                except Exception:
+                    extracted_text = ""
+
+            images = _render_pdf_pages(file_bytes)
+
+        if not images:
+            return {"name": "", "roll_no": "", "raw_ocr": extracted_text}
+
+        # Use all rendered pages for identity, not just the page chosen for answers.
+        ocr_parts = []
+        if extracted_text.strip():
+            ocr_parts.append(extracted_text)
+
+        for image in images:
+            page_text = _ocr_identity_text(image)
+            if page_text:
+                ocr_parts.append(page_text)
+
+        combined_text = "\n".join(ocr_parts)
+
+        return {
+            "name": _extract_name_from_ocr(combined_text),
+            "roll_no": _extract_roll_from_ocr(combined_text),
+            "raw_ocr": combined_text,
+        }
+
+    except Exception as exc:
+        return {
+            "name": "",
+            "roll_no": "",
+            "raw_ocr": f"IDENTITY OCR ERROR: {exc}",
+        }
+
+
+# ============================================================
 # MAIN FILE PARSER
 # ============================================================
 
@@ -2141,400 +2322,480 @@ with tabs[0]:
     )
 
 
-    c1, c2 = st.columns(2)
+    st.info(
+        "ℹ️ Candidate name and roll number are read automatically "
+        "from the OMR sheets. You do not need to enter them manually. "
+        "All six OMR sheets are required, and all six must contain the "
+        "same name and roll number before a marksheet can be published."
+    )
+
+    st.divider()
+
+    # The upload section is always enabled; identity comes only from OMR.
+    # All candidate identity data is obtained from the uploaded sheets.
+
+    st.write(
+
+        "### 📂 Upload Your OMR "
+        "Response Sheets & Select OMR Set Code"
+    )
 
 
-    with c1:
+    omr_files = {}
 
-        student_name = st.text_input(
+    omr_sets = {}
 
-            "Candidate Full Name*",
 
-            placeholder=
-                "e.g. Rahul Kumar"
+    # ====================================================
+    # SIX PAPERS
+    # ====================================================
+
+    for code, meta in SUBJECT_META.items():
+
+        category_tag = (
+
+            "Qualifying Paper (Min 30%)"
+
+            if meta["type"] == "qualifying"
+
+            else
+
+            "Merit Paper"
         )
 
 
-    with c2:
-
-        roll_no = st.text_input(
-
-            "Roll Number / Registration No.*",
-
-            placeholder=
-                "e.g. 10843"
+        available_sets = list(
+            OFFICIAL_KEYS[code].keys()
         )
+
+
+        with st.expander(
+
+            f"📄 {code}: "
+            f"{meta['name']} "
+            f"[{category_tag}]",
+
+            expanded=False
+        ):
+
+            col_s, col_f = st.columns(
+                [1, 2]
+            )
+
+
+            with col_s:
+
+                omr_sets[code] = (
+                    st.selectbox(
+
+                        f"Select OMR Set for {code}",
+
+                        options=
+                            available_sets,
+
+                        key=
+                            f"set_{code}"
+                    )
+                )
+
+
+            with col_f:
+
+                omr_files[code] = (
+                    st.file_uploader(
+
+                        f"Upload {code} "
+                        "OMR Sheet "
+                        "(PDF / JPG / PNG)",
+
+                        type=[
+                            "pdf",
+                            "jpg",
+                            "jpeg",
+                            "png"
+                        ],
+
+                        key=
+                            f"omr_{code}"
+                    )
+                )
 
 
     st.divider()
 
 
-    if (
-        not student_name.strip()
-        or
-        not roll_no.strip()
+    # ====================================================
+    # CALCULATE
+    # ====================================================
+
+    if st.button(
+
+        "🚀 Verify All Six OMR Sheets & Generate Marksheet",
+
+        type="primary"
     ):
 
-        st.warning(
+        # =================================================
+        # HARD GATE: EXACTLY SIX REQUIRED OMR SHEETS
+        # =================================================
 
-            "⚠️ Enter Candidate Name "
-            "and Roll Number above "
-            "to enable OMR uploads."
+        missing_codes = [
+            code
+            for code in SUBJECT_META
+            if omr_files.get(code) is None
+        ]
+
+        if missing_codes:
+            st.error(
+                "❌ Marksheet NOT published. All six OMR sheets are required. "
+                f"Missing: {', '.join(missing_codes)}."
+            )
+            st.stop()
+
+        # =================================================
+        # HARD GATE: NAME + ROLL MUST MATCH ON ALL SIX SHEETS
+        # =================================================
+
+        identity_results = {}
+        for code in SUBJECT_META:
+            identity_results[code] = extract_omr_identity(
+                omr_files[code]
+            )
+
+        normalized_identities = {}
+        identity_rows = []
+
+        for code, identity in identity_results.items():
+            normalized_identities[code] = {
+                "name": _normalize_identity_name(identity.get("name", "")),
+                "roll_no": _normalize_roll_number(identity.get("roll_no", "")),
+            }
+            identity_rows.append({
+                "Paper": code,
+                "Name detected from OMR": identity.get("name") or "NOT DETECTED",
+                "Roll number detected from OMR": identity.get("roll_no") or "NOT DETECTED",
+            })
+
+        st.write("### 🔎 OMR Identity Verification")
+        st.dataframe(
+            pd.DataFrame(identity_rows),
+            hide_index=True,
+            use_container_width=True,
         )
 
-
-    else:
-
-        st.write(
-
-            "### 📂 Upload Your OMR "
-            "Response Sheets & Select OMR Set Code"
+        identity_values = list(normalized_identities.values())
+        all_identity_present = all(
+            item["name"] and item["roll_no"]
+            for item in identity_values
         )
 
+        same_identity = (
+            all_identity_present
+            and len({item["name"] for item in identity_values}) == 1
+            and len({item["roll_no"] for item in identity_values}) == 1
+        )
 
-        omr_files = {}
+        if not same_identity:
+            st.error(
+                "❌ Marksheet NOT published. The six OMR sheets do not have "
+                "the same valid name and roll number. Every sheet must match "
+                "the other five sheets exactly after OCR normalization."
+            )
+            st.warning(
+                "Please re-upload/correct the OMR sheets. No score was saved "
+                "to the database and no rank was generated."
+            )
+            st.stop()
 
-        omr_sets = {}
+        # Identity is now trusted only because all six OMR sheets agree.
+        # Keep the display name as detected from the first OMR sheet; use
+        # normalized values only for matching/validation.
+        first_code = next(iter(SUBJECT_META))
+        student_name = identity_results[first_code]["name"]
+        roll_no = identity_values[0]["roll_no"]
+
+        paper_results = {}
+
+        merit_total = 0
+
+        merit_max = 0
 
 
-        # ====================================================
-        # SIX PAPERS
-        # ====================================================
+        # =================================================
+        # PROCESS EVERY PAPER
+        # =================================================
 
         for code, meta in SUBJECT_META.items():
 
-            category_tag = (
-
-                "Qualifying Paper (Min 30%)"
-
-                if meta["type"] == "qualifying"
-
-                else
-
-                "Merit Paper"
+            selected_set = (
+                omr_sets[code]
             )
 
 
-            available_sets = list(
-                OFFICIAL_KEYS[code].keys()
+            official_key = (
+                OFFICIAL_KEYS[
+                    code
+                ][
+                    selected_set
+                ]
             )
 
 
-            with st.expander(
+            parsed_responses = (
+                parse_omr_file(
+                    omr_files.get(code)
+                )
+            )
 
-                f"📄 {code}: "
-                f"{meta['name']} "
-                f"[{category_tag}]",
+            if not parsed_responses:
+                st.error(
+                    f"❌ Marksheet NOT published. {code} OMR answers could not be read."
+                )
+                st.warning(
+                    "No database record or rank was created. Please upload a clearer "
+                    "OMR sheet and try again."
+                )
+                st.stop()
 
-                expanded=False
-            ):
 
-                col_s, col_f = st.columns(
-                    [1, 2]
+            eval_res = evaluate_paper(
+
+                parsed_responses,
+
+                official_key
+            )
+
+
+            # ---------------------------------------------
+            # QUALIFYING
+            # ---------------------------------------------
+
+            is_passed = True
+
+
+            if meta["type"] == "qualifying":
+
+                is_passed = (
+
+                    eval_res["pct"]
+                    >=
+                    meta["cutoff_pct"]
                 )
 
 
-                with col_s:
+            # ---------------------------------------------
+            # MERIT
+            # ---------------------------------------------
 
-                    omr_sets[code] = (
-                        st.selectbox(
+            else:
 
-                            f"Select OMR Set for {code}",
-
-                            options=
-                                available_sets,
-
-                            key=
-                                f"set_{code}"
-                        )
-                    )
+                merit_total += (
+                    eval_res["score"]
+                )
 
 
-                with col_f:
-
-                    omr_files[code] = (
-                        st.file_uploader(
-
-                            f"Upload {code} "
-                            "OMR Sheet "
-                            "(PDF / JPG / PNG)",
-
-                            type=[
-                                "pdf",
-                                "jpg",
-                                "jpeg",
-                                "png"
-                            ],
-
-                            key=
-                                f"omr_{code}"
-                        )
-                    )
+                merit_max += (
+                    eval_res["max_marks"]
+                )
 
 
-        st.divider()
+            eval_res["passed"] = (
+                is_passed
+            )
 
 
-        # ====================================================
-        # CALCULATE
-        # ====================================================
+            eval_res["subject_name"] = (
+                meta["name"]
+            )
 
-        if st.button(
 
-            "🚀 Calculate Scores "
-            "& Generate Marksheet",
+            eval_res["type"] = (
+                meta["type"]
+            )
 
-            type="primary"
+
+            eval_res["set_name"] = (
+                selected_set
+            )
+
+
+            paper_results[code] = (
+                eval_res
+            )
+
+
+        # =================================================
+        # OVERALL QUALIFICATION
+        # =================================================
+
+        is_qualified = (
+
+            paper_results["P1"]["passed"]
+
+            and
+
+            paper_results["P2"]["passed"]
+        )
+
+
+        merit_pct = (
+
+            round(
+                (
+                    merit_total
+                    /
+                    merit_max
+                )
+                * 100,
+                2
+            )
+
+            if merit_max > 0
+
+            else
+
+            0.0
+        )
+
+
+        # =================================================
+        # DATABASE
+        # =================================================
+
+        db = load_data()
+
+
+        # Remove previous result for same roll number.
+
+        db = [
+
+            item
+
+            for item in db
+
+            if str(
+                item["roll_no"]
+            ).strip()
+            !=
+            str(
+                roll_no
+            ).strip()
+        ]
+
+
+        new_entry = {
+
+            "name":
+                student_name,
+
+            "roll_no":
+                roll_no,
+
+            "papers":
+                paper_results,
+
+            "merit_total":
+                merit_total,
+
+            "merit_max":
+                merit_max,
+
+            "merit_pct":
+                merit_pct,
+
+            "qualified":
+                is_qualified,
+
+            # This record was created only after all six OMR sheets
+            # supplied the same OCR-verified identity.
+            "identity_verified":
+                True
+        }
+
+
+        db.append(
+            new_entry
+        )
+
+
+        # =================================================
+        # RANKING
+        # =================================================
+
+        # Only records verified from all six OMR sheets can appear
+        # in the new merit ranking. Legacy/manual records are not ranked.
+        verified_records = [
+            item
+            for item in db
+            if item.get("identity_verified", False) is True
+        ]
+
+        unverified_records = [
+            item
+            for item in db
+            if item.get("identity_verified", False) is not True
+        ]
+
+        verified_records.sort(
+
+            key=lambda x: (
+
+                x["qualified"],
+
+                x["merit_total"]
+
+            ),
+
+            reverse=True
+        )
+
+
+        for rank_idx, record in enumerate(
+
+            verified_records,
+
+            start=1
         ):
 
-            paper_results = {}
-
-            merit_total = 0
-
-            merit_max = 0
-
-
-            # =================================================
-            # PROCESS EVERY PAPER
-            # =================================================
-
-            for code, meta in SUBJECT_META.items():
-
-                selected_set = (
-                    omr_sets[code]
-                )
-
-
-                official_key = (
-                    OFFICIAL_KEYS[
-                        code
-                    ][
-                        selected_set
-                    ]
-                )
-
-
-                parsed_responses = (
-                    parse_omr_file(
-                        omr_files.get(code)
-                    )
-                )
-
-
-                eval_res = evaluate_paper(
-
-                    parsed_responses,
-
-                    official_key
-                )
-
-
-                # ---------------------------------------------
-                # QUALIFYING
-                # ---------------------------------------------
-
-                is_passed = True
-
-
-                if meta["type"] == "qualifying":
-
-                    is_passed = (
-
-                        eval_res["pct"]
-                        >=
-                        meta["cutoff_pct"]
-                    )
-
-
-                # ---------------------------------------------
-                # MERIT
-                # ---------------------------------------------
-
-                else:
-
-                    merit_total += (
-                        eval_res["score"]
-                    )
-
-
-                    merit_max += (
-                        eval_res["max_marks"]
-                    )
-
-
-                eval_res["passed"] = (
-                    is_passed
-                )
-
-
-                eval_res["subject_name"] = (
-                    meta["name"]
-                )
-
-
-                eval_res["type"] = (
-                    meta["type"]
-                )
-
-
-                eval_res["set_name"] = (
-                    selected_set
-                )
-
-
-                paper_results[code] = (
-                    eval_res
-                )
-
-
-            # =================================================
-            # OVERALL QUALIFICATION
-            # =================================================
-
-            is_qualified = (
-
-                paper_results["P1"]["passed"]
-
-                and
-
-                paper_results["P2"]["passed"]
+            record["rank"] = (
+                rank_idx
             )
 
+        # Explicitly remove stale ranks from legacy records.
+        for record in unverified_records:
+            record.pop("rank", None)
 
-            merit_pct = (
+        db = verified_records + unverified_records
 
-                round(
-                    (
-                        merit_total
-                        /
-                        merit_max
-                    )
-                    * 100,
-                    2
-                )
 
-                if merit_max > 0
+        save_data(db)
 
-                else
 
-                0.0
+        st.balloons()
+
+
+        saved_record = next(
+
+            item
+
+            for item in db
+
+            if str(
+                item["roll_no"]
             )
-
-
-            # =================================================
-            # DATABASE
-            # =================================================
-
-            db = load_data()
-
-
-            # Remove previous result for same roll number.
-
-            db = [
-
-                item
-
-                for item in db
-
-                if str(
-                    item["roll_no"]
-                ).strip()
-                !=
-                str(
-                    roll_no
-                ).strip()
-            ]
-
-
-            new_entry = {
-
-                "name":
-                    student_name,
-
-                "roll_no":
-                    roll_no,
-
-                "papers":
-                    paper_results,
-
-                "merit_total":
-                    merit_total,
-
-                "merit_max":
-                    merit_max,
-
-                "merit_pct":
-                    merit_pct,
-
-                "qualified":
-                    is_qualified
-            }
-
-
-            db.append(
-                new_entry
+            ==
+            str(
+                roll_no
             )
+        )
 
 
-            # =================================================
-            # RANKING
-            # =================================================
+        render_marksheet(
 
-            db.sort(
+            saved_record,
 
-                key=lambda x: (
-
-                    x["qualified"],
-
-                    x["merit_total"]
-
-                ),
-
-                reverse=True
-            )
-
-
-            for rank_idx, record in enumerate(
-
-                db,
-
-                start=1
-            ):
-
-                record["rank"] = (
-                    rank_idx
-                )
-
-
-            save_data(db)
-
-
-            st.balloons()
-
-
-            saved_record = next(
-
-                item
-
-                for item in db
-
-                if str(
-                    item["roll_no"]
-                )
-                ==
-                str(
-                    roll_no
-                )
-            )
-
-
-            render_marksheet(
-
-                saved_record,
-
-                len(db)
-            )
-
+            len(db)
+        )
 
 # ============================================================
 # TAB 2
@@ -2618,15 +2879,19 @@ with tabs[2]:
     )
 
 
-    db = load_data()
+    db = [
+        item
+        for item in load_data()
+        if item.get("identity_verified", False) is True
+    ]
 
 
     if not db:
 
         st.info(
 
-            "No candidates have uploaded "
-            "their OMR responses yet."
+            "No candidates with six matching, identity-verified OMR sheets "
+            "have been published yet."
         )
 
 
