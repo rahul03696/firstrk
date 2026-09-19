@@ -2432,10 +2432,12 @@ with tabs[0]:
 
 
     st.info(
-        "ℹ️ The roll number is read automatically from the OMR bubbles "
-        "from the OMR sheets. You do not need to enter them manually. "
-        "All six OMR sheets are required, and all six must contain the "
-        "the same roll number before a marksheet can be published."
+        "ℹ️ The roll number is read automatically from the OMR bubbles. "
+        "You do not need to enter it manually. The Question Booklet Series "
+        "must be confirmed MANUALLY for every paper by selecting the booklet "
+        "printed on that response sheet and ticking the confirmation box. "
+        "All six OMR sheets and all six booklet confirmations are required "
+        "before a marksheet can be published."
     )
 
     st.divider()
@@ -2452,7 +2454,10 @@ with tabs[0]:
 
     omr_files = {}
 
+    # The booklet series is intentionally NOT detected by OCR.
+    # The user must manually select and confirm the booklet printed on each OMR.
     omr_sets = {}
+    booklet_confirmed = {}
 
 
     # ====================================================
@@ -2494,17 +2499,21 @@ with tabs[0]:
 
             with col_s:
 
-                omr_sets[code] = (
-                    st.selectbox(
+                omr_sets[code] = st.selectbox(
+                    f"Select Question Booklet Series for {code}",
+                    options=available_sets,
+                    key=f"set_{code}",
+                    help=(
+                        "Look at the Question Booklet Series printed on this "
+                        "response sheet and select the matching booklet here. "
+                        "This selection is used to choose the answer key."
+                    ),
+                )
 
-                        f"Select OMR Set for {code}",
-
-                        options=
-                            available_sets,
-
-                        key=
-                            f"set_{code}"
-                    )
+                booklet_confirmed[code] = st.checkbox(
+                    f"I manually confirm that this response sheet is "
+                    f"booklet {omr_sets[code]}",
+                    key=f"confirm_booklet_{code}",
                 )
 
 
@@ -2573,8 +2582,7 @@ with tabs[0]:
         identity_results = {}
         for code in SUBJECT_META:
             identity_results[code] = extract_omr_identity(
-                omr_files[code],
-                valid_sets=list(OFFICIAL_KEYS[code].keys()),
+                omr_files[code]
             )
 
         normalized_rolls = {}
@@ -2587,8 +2595,8 @@ with tabs[0]:
             identity_rows.append({
                 "Paper": code,
                 "Roll number detected from OMR": identity.get("roll_no") or "NOT DETECTED",
-                "Booklet set detected from OMR": identity.get("booklet_set") or "NOT DETECTED",
-                "Answer key selected": omr_sets[code],
+                "Booklet manually selected": omr_sets[code],
+                "Booklet manually confirmed": "YES" if booklet_confirmed[code] else "NO",
             })
 
         st.write("### 🔎 OMR Roll Number Verification")
@@ -2620,54 +2628,43 @@ with tabs[0]:
             st.stop()
 
         # =================================================
-        # HARD GATE: ANSWER-KEY SET MUST MATCH OMR SET
+        # HARD GATE: MANUAL BOOKLET CONFIRMATION
         # =================================================
+        # Booklet series is deliberately NOT detected from the OMR image.
+        # The student/operator must manually select the booklet printed on
+        # each response sheet and explicitly confirm it.  The selected
+        # booklet is then used to choose the corresponding answer key.
 
-        set_mismatches = []
-        for code in SUBJECT_META:
-            detected_set = str(
-                identity_results[code].get("booklet_set", "")
-            ).strip()
-            selected_set = str(omr_sets[code]).strip()
+        unconfirmed_booklets = [
+            f"{code}: booklet {omr_sets[code]} was not manually confirmed"
+            for code in SUBJECT_META
+            if not booklet_confirmed.get(code, False)
+        ]
 
-            normalized_detected_set = _normalize_booklet_set(detected_set)
-            normalized_selected_set = _normalize_booklet_set(selected_set)
-
-            if not normalized_detected_set:
-                set_mismatches.append(
-                    f"{code}: OMR booklet set could not be detected "
-                    f"(selected answer key: {selected_set})"
-                )
-            elif normalized_detected_set != normalized_selected_set:
-                set_mismatches.append(
-                    f"{code}: OMR response sheet booklet is "
-                    f"{detected_set or 'NOT DETECTED'}, but "
-                    f"{selected_set} answer key was selected"
-                )
-
-        if set_mismatches:
+        if unconfirmed_booklets:
             st.error(
-                "❌ Marksheet NOT published. The OMR response-sheet booklet "
-                "set does not exactly match the selected answer-key booklet set."
+                "❌ Marksheet NOT published. The Question Booklet Series "
+                "must be manually confirmed for all six response sheets."
             )
             st.warning(
-                "Each paper must be scored only against the answer key for "
-                "the same Question Booklet Series printed on the OMR sheet. "
-                "A booklet mismatch blocks publication and saving of the result."
+                "For every paper, read the Question Booklet Series printed "
+                "on the response sheet, select the matching booklet above, "
+                "and tick the manual confirmation box. The selected booklet "
+                "will be used as the answer key for that paper. No score, "
+                "marksheet, or rank is saved until all six confirmations are made."
             )
             st.dataframe(
-                pd.DataFrame({"Set mismatch": set_mismatches}),
+                pd.DataFrame({"Booklet confirmation required": unconfirmed_booklets}),
                 hide_index=True,
                 use_container_width=True,
             )
             st.stop()
 
-        # Cross-subject student identity and every paper's answer-key set are
-        # now verified before scoring.  For example, the supplied sample
-        # papers can have different printed OMR Sheet Nos. (and different
-        # booklet letters) while still belonging to the same student because
-        # their bubbled Roll Number is the same.
-        # The real roll number remains private and is never shown publicly.
+        # Cross-subject student identity and manual booklet confirmations are
+        # now verified before scoring. Different subjects may have different
+        # booklet letters; each subject is scored only with the manually
+        # selected answer key for that subject. The real roll number remains
+        # private and is never shown publicly.
         roll_no = roll_values[0]
 
         paper_results = {}
