@@ -1446,6 +1446,27 @@ def _extract_roll_from_bubbles(image):
     return "".join(digits)
 
 
+def _normalize_booklet_set(value):
+    """Normalize an OMR booklet label for an exact response/key comparison.
+
+    The OMR response sheet may expose only the letter (for example ``J``),
+    while the answer-key dictionary uses ``Set-J``. Both represent the same
+    booklet. Anything else remains distinct, so a wrong booklet cannot pass
+    the publication gate merely because of formatting.
+    """
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    # Accept forms such as J, SET-J, BOOKLET-J, BOOKLET SERIES J.
+    match = re.search(r"(?:BOOKLET\s*(?:SERIES)?|SET)\s*[-:]?\s*([A-Z0-9]+)$", text)
+    if match:
+        token = match.group(1)
+    else:
+        token_match = re.search(r"([A-Z0-9]+)$", text)
+        token = token_match.group(1) if token_match else text
+    return f"SET-{token}"
+
+
 def _extract_booklet_set(image, valid_sets=None):
     """Read the printed Question Booklet Series from the OMR sheet.
 
@@ -2499,8 +2520,13 @@ with tabs[0]:
             st.stop()
 
         # =================================================
-        # HARD GATE: NAME + ROLL MUST MATCH ON ALL SIX SHEETS
+        # HARD GATE: SAME STUDENT ACROSS ALL SIX SUBJECT SHEETS
         # =================================================
+        # Student identity is determined ONLY by the six-digit bubbled
+        # Roll Number.  The printed OMR Sheet No. is deliberately ignored
+        # because it can be different on every subject paper.  The booklet
+        # series can also differ by subject and is checked separately only
+        # against that subject's selected answer key.
 
         identity_results = {}
         for code in SUBJECT_META:
@@ -2539,12 +2565,15 @@ with tabs[0]:
 
         if not same_roll:
             st.error(
-                "❌ Marksheet NOT published. The six OMR sheets do not have "
-                "the same valid bubbled roll number."
+                "❌ Marksheet NOT published. All six subject response sheets "
+                "must contain the same valid bubbled roll number."
             )
             st.warning(
-                "Only the bubbled roll number is used for student identity. "
-                "No score was saved and no rank was generated."
+                "Different subjects may have different OMR Sheet Nos. and "
+                "different Question Booklet Series. Those fields are NOT used "
+                "to identify the student. Only the bubbled roll number is used "
+                "for cross-subject student matching. No score was saved and "
+                "no rank was generated."
             )
             st.stop()
 
@@ -2554,31 +2583,35 @@ with tabs[0]:
 
         set_mismatches = []
         for code in SUBJECT_META:
-            detected_set_letter = str(
+            detected_set = str(
                 identity_results[code].get("booklet_set", "")
-            ).strip().upper()
+            ).strip()
             selected_set = str(omr_sets[code]).strip()
-            selected_set_letter = selected_set[-1:].upper()
 
-            if not detected_set_letter:
+            normalized_detected_set = _normalize_booklet_set(detected_set)
+            normalized_selected_set = _normalize_booklet_set(selected_set)
+
+            if not normalized_detected_set:
                 set_mismatches.append(
                     f"{code}: OMR booklet set could not be detected "
                     f"(selected answer key: {selected_set})"
                 )
-            elif detected_set_letter != selected_set_letter:
+            elif normalized_detected_set != normalized_selected_set:
                 set_mismatches.append(
-                    f"{code}: OMR sheet is Set-{detected_set_letter}, "
-                    f"but Set-{selected_set_letter} answer key was selected"
+                    f"{code}: OMR response sheet booklet is "
+                    f"{detected_set or 'NOT DETECTED'}, but "
+                    f"{selected_set} answer key was selected"
                 )
 
         if set_mismatches:
             st.error(
                 "❌ Marksheet NOT published. The OMR response-sheet booklet "
-                "set does not match the selected answer-key set."
+                "set does not exactly match the selected answer-key booklet set."
             )
             st.warning(
                 "Each paper must be scored only against the answer key for "
-                "the same Question Booklet Series printed on the OMR sheet."
+                "the same Question Booklet Series printed on the OMR sheet. "
+                "A booklet mismatch blocks publication and saving of the result."
             )
             st.dataframe(
                 pd.DataFrame({"Set mismatch": set_mismatches}),
@@ -2587,7 +2620,11 @@ with tabs[0]:
             )
             st.stop()
 
-        # Roll number and answer-key set are now verified before scoring.
+        # Cross-subject student identity and every paper's answer-key set are
+        # now verified before scoring.  For example, the supplied sample
+        # papers can have different printed OMR Sheet Nos. (and different
+        # booklet letters) while still belonging to the same student because
+        # their bubbled Roll Number is the same.
         # The real roll number remains private and is never shown publicly.
         roll_no = roll_values[0]
 
@@ -2787,8 +2824,8 @@ with tabs[0]:
             "qualified":
                 is_qualified,
 
-            # This record was created only after all six OMR sheets
-            # supplied the same OCR-verified identity.
+            # This record was created only after all six subject response
+            # sheets supplied the same verified bubbled roll number.
             "identity_verified":
                 True
         }
