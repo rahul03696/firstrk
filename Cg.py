@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+from difflib import SequenceMatcher
 import cv2
 import numpy as np
 import pandas as pd
@@ -1361,75 +1362,136 @@ def _normalize_roll_number(value):
     return re.sub(r"\D", "", str(value))
 
 
-def _ocr_identity_text(image):
-    """Run several OCR passes because OMR identity fields may be faint."""
+def _name_from_targeted_ocr(image):
+    """Read the handwritten candidate name from the fixed OMR name box.
+
+    The supplied OMR has red printed labels and black handwritten text.  OCR
+    works much better when the black handwriting is isolated from the red
+    template before recognition.
+    """
     if pytesseract is None or image is None:
         return ""
 
-    texts = []
-    rgb = np.array(image.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-
-    variants = [
-        (image, "--psm 6"),
-        (image, "--psm 11"),
-        (Image.fromarray(gray), "--psm 6"),
-    ]
-
-    # Add a thresholded pass for light/handwritten text.
-    _, thresholded = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    w, h = image.size
+    box = (
+        int(w * 0.105),
+        int(h * 0.076),
+        int(w * 0.825),
+        int(h * 0.097),
     )
-    variants.append((Image.fromarray(thresholded), "--psm 6"))
+    crop = image.crop(box).convert("RGB")
+    # The application's PDF renderer uses 300 DPI.  Upsampling also helps
+    # when the user uploads a lower-resolution PNG/JPEG.
+    crop = crop.resize((crop.width * 2, crop.height * 2))
+    rgb = np.array(crop)
+    r, g, b = cv2.split(rgb)
 
-    for variant, config in variants:
-        try:
-            text = pytesseract.image_to_string(variant, config=config)
-            if text and text.strip():
-                texts.append(text)
-        except Exception:
-            pass
+    # Keep dark neutral/black ink and suppress the red printed template.
+    ink_mask = ((r < 120) & (g < 120) & (b < 120)).astype(np.uint8) * 255
+    candidates = []
+    for arr in (ink_mask, 255 - ink_mask):
+        for psm in (6, 7):
+            try:
+                text = pytesseract.image_to_string(
+                    arr,
+                    config=(
+                        f"--psm {psm} "
+                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "
+                    ),
+                )
+            except Exception:
+                continue
 
-    return "\n".join(texts)
+            cleaned = _normalize_identity_name(text)
+            # Remove very short OCR debris, but preserve the student's words.
+            words = [w for w in cleaned.split() if len(re.sub(r"[^A-Z]", "", w)) >= 2]
+            cleaned = " ".join(words)
+            letters = re.sub(r"[^A-Z]", "", cleaned)
+            if len(letters) >= 5:
+                candidates.append(cleaned)
 
-
-def _extract_roll_from_ocr(text):
-    """Extract a roll/registration number from OCR text near an identity label."""
-    if not text:
+    if not candidates:
         return ""
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    label_pattern = re.compile(
-        r"(?:ROLL(?:\s*(?:NO|NUMBER))?|REG(?:ISTRATION)?(?:\s*NO|\s*NUMBER)?)",
-        re.I,
+    # Prefer a multi-word/long candidate.  Cross-sheet fuzzy matching below
+    # handles small OCR differences such as RAHULKOUMAR vs FRAHULKUMMAR.
+    candidates.sort(
+        key=lambda x: (
+            1 if len(x.split()) >= 2 else 0,
+            len(re.sub(r"[^A-Z]", "", x)),
+        ),
+        reverse=True,
     )
+    return candidates[0]
 
-    # Prefer digits on the same line as Roll/Registration.
-    for line in lines:
-        if label_pattern.search(line):
-            digits = re.findall(r"\d{4,12}", line)
-            if digits:
-                return _normalize_roll_number(digits[-1])
 
-    # Fallback: OCR may split the label and number onto adjacent lines.
-    for i, line in enumerate(lines):
-        if label_pattern.search(line):
-            for candidate in lines[i:i + 3]:
-                digits = re.findall(r"\d{4,12}", candidate)
-                if digits:
-                    return _normalize_roll_number(digits[-1])
+def _name_similarity(a, b):
+    """Return a 0-1 similarity score for OCR names."""
+    a = _normalize_identity_name(a).replace(" ", "")
+    b = _normalize_identity_name(b).replace(" ", "")
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
 
-    # Last-resort: use a standalone 4-12 digit token, but only when unique.
-    all_digits = re.findall(r"\b\d{4,12}\b", text)
-    unique_digits = list(dict.fromkeys(_normalize_roll_number(x) for x in all_digits))
-    if len(unique_digits) == 1:
-        return unique_digits[0]
 
-    return ""
+def _extract_roll_from_bubbles(image):
+    """Read the six-digit roll number from the OMR bubble grid.
+
+    The sample sheets have a six-column x ten-row roll grid.  This deliberately
+    ignores the printed 'OMR Sheet No.' because that number changes from paper
+    to paper for the same candidate.
+    """
+    if image is None:
+        return ""
+
+    rgb = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape[:2]
+
+    # Relative positions measured from the supplied OMR template.
+    x0 = 0.1635 * w
+    dx = 0.0380 * w
+    y0 = 0.1735 * h
+    dy = 0.0103 * h
+
+    digits = []
+    confidence = []
+
+    for col in range(6):
+        x = x0 + col * dx
+        scores = []
+        for row in range(10):
+            y = y0 + row * dy
+            cx, cy = int(round(x)), int(round(y))
+            radius = max(5, int(round(0.006 * min(w, h))))
+            patch = gray[
+                max(0, cy - radius):min(h, cy + radius + 1),
+                max(0, cx - radius):min(w, cx + radius + 1),
+            ]
+            if patch.size == 0:
+                scores.append(0)
+                continue
+            # Filled bubbles contain substantially more dark pixels than the
+            # outlined bubbles and their printed row numbers.
+            scores.append(int(np.sum(patch < 100)))
+
+        order = np.argsort(scores)[::-1]
+        best = int(order[0])
+        best_score = scores[best]
+        second_score = scores[int(order[1])] if len(order) > 1 else 0
+        digits.append(str(best))
+        confidence.append((best_score, second_score))
+
+    # Filled circles in this template are normally ~60-90 dark pixels in the
+    # sampling patch, while empty circles are far lower.
+    if not all(best >= 25 and best >= second + 15 for best, second in confidence):
+        return ""
+
+    return "".join(digits)
 
 
 def _extract_name_from_ocr(text):
-    """Extract candidate name from OCR text near a Name/Candidate Name label."""
+    """Legacy full-page fallback for templates where targeted OCR is unavailable."""
     if not text:
         return ""
 
@@ -1444,7 +1506,6 @@ def _extract_name_from_ocr(text):
         if not match:
             continue
 
-        # Text after the label on the same line.
         value = line[match.end():].strip(" :-_=|\t")
         value = re.sub(r"^(?:MR|MS|MRS|MISS)\.?\s+", "", value, flags=re.I)
         value = re.sub(r"[^A-Za-z .'-]", " ", value)
@@ -1452,10 +1513,8 @@ def _extract_name_from_ocr(text):
         if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
             return _normalize_identity_name(value)
 
-        # Or the value may be on the following line.
         if i + 1 < len(lines):
-            value = lines[i + 1]
-            value = re.sub(r"[^A-Za-z .'-]", " ", value)
+            value = re.sub(r"[^A-Za-z .'-]", " ", lines[i + 1])
             value = re.sub(r"\s+", " ", value).strip()
             if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
                 return _normalize_identity_name(value)
@@ -1463,10 +1522,74 @@ def _extract_name_from_ocr(text):
     return ""
 
 
-def extract_omr_identity(uploaded_file):
-    """Extract the name and roll number printed/written on one OMR file."""
+def _extract_booklet_set(image, valid_sets=None):
+    """Read the printed Question Booklet Series from the OMR sheet.
+
+    The response sheet contains a large booklet-series letter (for example J)
+    near the top-center of the page.  This is deliberately read from the OMR
+    itself so a user cannot accidentally score a Set-J response sheet against
+    a different answer-key set.
+    """
+    if image is None or pytesseract is None:
+        return ""
+
+    valid_sets = valid_sets or []
+    valid_letters = {
+        str(item).strip().upper()[-1]
+        for item in valid_sets
+        if str(item).strip()
+    }
+    if not valid_letters:
+        valid_letters = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+
+    # The supplied BPSC template places the large booklet letter in this box.
+    crop = rgb.crop((
+        int(0.47 * w),
+        int(0.16 * h),
+        int(0.66 * w),
+        int(0.31 * h),
+    ))
+    # Upscale the large booklet letter for more reliable OCR.
+    crop = crop.resize((crop.width * 3, crop.height * 3))
+
+    variants = [crop]
+    gray = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2GRAY)
+    variants.append(Image.fromarray(gray))
+    _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    variants.append(Image.fromarray(threshold))
+
+    candidates = []
+    for variant in variants:
+        for psm in (6, 10, 11, 13):
+            try:
+                text = pytesseract.image_to_string(
+                    variant,
+                    config=f"--psm {psm}",
+                ).upper()
+            except Exception:
+                continue
+
+            # Prefer an isolated valid set letter.
+            tokens = re.findall(r"[A-Z]", text)
+            for token in tokens:
+                if token in valid_letters:
+                    candidates.append(token)
+
+    if not candidates:
+        return ""
+
+    # Most frequent OCR candidate wins.
+    counts = Counter(candidates)
+    return counts.most_common(1)[0][0]
+
+
+def extract_omr_identity(uploaded_file, valid_sets=None):
+    """Extract name, roll number and booklet set from one OMR file."""
     if uploaded_file is None:
-        return {"name": "", "roll_no": "", "raw_ocr": ""}
+        return {"name": "", "roll_no": "", "booklet_set": "", "raw_ocr": ""}
 
     file_bytes = uploaded_file.getvalue()
     file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
@@ -1505,9 +1628,25 @@ def extract_omr_identity(uploaded_file):
 
         combined_text = "\n".join(ocr_parts)
 
+        # The candidate name is handwritten, so OCR only the name box.
+        # The roll number is bubble-coded; do NOT use the printed OMR Sheet No.
+        # because that number can differ between papers for the same student.
+        first_image = images[0]
+        detected_name = _name_from_targeted_ocr(first_image)
+        detected_roll = _extract_roll_from_bubbles(first_image)
+        detected_booklet_set = _extract_booklet_set(
+            first_image,
+            valid_sets=valid_sets,
+        )
+
+        # Keep the old OCR parser only as a name fallback for alternate templates.
+        if not detected_name:
+            detected_name = _extract_name_from_ocr(combined_text)
+
         return {
-            "name": _extract_name_from_ocr(combined_text),
-            "roll_no": _extract_roll_from_ocr(combined_text),
+            "name": detected_name,
+            "roll_no": detected_roll,
+            "booklet_set": detected_booklet_set,
             "raw_ocr": combined_text,
         }
 
@@ -1515,6 +1654,7 @@ def extract_omr_identity(uploaded_file):
         return {
             "name": "",
             "roll_no": "",
+            "booklet_set": "",
             "raw_ocr": f"IDENTITY OCR ERROR: {exc}",
         }
 
@@ -2459,7 +2599,8 @@ with tabs[0]:
         identity_results = {}
         for code in SUBJECT_META:
             identity_results[code] = extract_omr_identity(
-                omr_files[code]
+                omr_files[code],
+                valid_sets=list(OFFICIAL_KEYS[code].keys()),
             )
 
         normalized_identities = {}
@@ -2474,6 +2615,8 @@ with tabs[0]:
                 "Paper": code,
                 "Name detected from OMR": identity.get("name") or "NOT DETECTED",
                 "Roll number detected from OMR": identity.get("roll_no") or "NOT DETECTED",
+                "Booklet set detected from OMR": identity.get("booklet_set") or "NOT DETECTED",
+                "Answer key selected": omr_sets[code],
             })
 
         st.write("### 🔎 OMR Identity Verification")
@@ -2489,17 +2632,28 @@ with tabs[0]:
             for item in identity_values
         )
 
+        # Roll number must match exactly because it is read from the OMR
+        # bubbles.  Handwritten-name OCR can contain small character errors,
+        # so compare names fuzzily rather than rejecting the same student for
+        # OCR differences.
+        reference_name = identity_values[0]["name"] if identity_values else ""
+        name_matches = all(
+            _name_similarity(reference_name, item["name"]) >= 0.70
+            for item in identity_values
+        ) if all_identity_present else False
+
         same_identity = (
             all_identity_present
-            and len({item["name"] for item in identity_values}) == 1
+            and name_matches
             and len({item["roll_no"] for item in identity_values}) == 1
         )
 
         if not same_identity:
             st.error(
                 "❌ Marksheet NOT published. The six OMR sheets do not have "
-                "the same valid name and roll number. Every sheet must match "
-                "the other five sheets exactly after OCR normalization."
+                "the same valid student identity. The bubbled roll number must "
+                "match exactly, and the handwritten name must match after OCR "
+                "normalization."
             )
             st.warning(
                 "Please re-upload/correct the OMR sheets. No score was saved "
@@ -2507,7 +2661,46 @@ with tabs[0]:
             )
             st.stop()
 
-        # Identity is now trusted only because all six OMR sheets agree.
+        # =================================================
+        # HARD GATE: ANSWER-KEY SET MUST MATCH OMR SET
+        # =================================================
+
+        set_mismatches = []
+        for code in SUBJECT_META:
+            detected_set_letter = str(
+                identity_results[code].get("booklet_set", "")
+            ).strip().upper()
+            selected_set = str(omr_sets[code]).strip()
+            selected_set_letter = selected_set[-1:].upper()
+
+            if not detected_set_letter:
+                set_mismatches.append(
+                    f"{code}: OMR booklet set could not be detected "
+                    f"(selected answer key: {selected_set})"
+                )
+            elif detected_set_letter != selected_set_letter:
+                set_mismatches.append(
+                    f"{code}: OMR sheet is Set-{detected_set_letter}, "
+                    f"but Set-{selected_set_letter} answer key was selected"
+                )
+
+        if set_mismatches:
+            st.error(
+                "❌ Marksheet NOT published. The OMR response-sheet booklet "
+                "set does not match the selected answer-key set."
+            )
+            st.warning(
+                "Each paper must be scored only against the answer key for "
+                "the same Question Booklet Series printed on the OMR sheet."
+            )
+            st.dataframe(
+                pd.DataFrame({"Set mismatch": set_mismatches}),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.stop()
+
+        # Identity and answer-key set are now both verified before scoring.
         # Keep the display name as detected from the first OMR sheet; use
         # normalized values only for matching/validation.
         first_code = next(iter(SUBJECT_META))
