@@ -27,6 +27,13 @@ try:
 except ImportError:
     convert_from_bytes = None
 
+# PyMuPDF is the primary PDF renderer for Streamlit Cloud.
+# It does not require a separate Poppler installation.
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
 
 # ============================================================
 # CONFIGURATION
@@ -1140,8 +1147,65 @@ def process_image_cv_omr(
 def _render_pdf_pages(
     file_bytes
 ):
+    """
+    Render every PDF page at high resolution.
 
-    # First attempt: pdf2image.
+    PyMuPDF is deliberately used first because it works on Streamlit
+    servers without requiring a separate Poppler system package.
+    """
+
+    # --------------------------------------------------------
+    # PRIMARY: PyMuPDF
+    # --------------------------------------------------------
+
+    if fitz is not None:
+
+        try:
+
+            doc = fitz.open(
+                stream=file_bytes,
+                filetype="pdf"
+            )
+
+            pages = []
+
+            # 300 DPI is enough for this BPSC OMR template.
+            zoom = 300.0 / 72.0
+
+            matrix = fitz.Matrix(
+                zoom,
+                zoom
+            )
+
+            for page in doc:
+
+                pix = page.get_pixmap(
+                    matrix=matrix,
+                    alpha=False
+                )
+
+                pages.append(
+                    Image.frombytes(
+                        "RGB",
+                        [
+                            pix.width,
+                            pix.height
+                        ],
+                        pix.samples
+                    )
+                )
+
+            doc.close()
+
+            if pages:
+                return pages
+
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # SECONDARY: pdf2image
+    # --------------------------------------------------------
 
     if convert_from_bytes is not None:
 
@@ -1154,68 +1218,9 @@ def _render_pdf_pages(
             )
 
         except Exception:
-
             pass
 
-
-    # Second attempt: PyMuPDF.
-
-    try:
-
-        import fitz
-
-
-        doc = fitz.open(
-            stream=file_bytes,
-            filetype="pdf"
-        )
-
-
-        pages = []
-
-
-        zoom = (
-            300.0
-            /
-            72.0
-        )
-
-
-        matrix = fitz.Matrix(
-            zoom,
-            zoom
-        )
-
-
-        for page in doc:
-
-            pix = page.get_pixmap(
-                matrix=matrix,
-                alpha=False
-            )
-
-
-            pages.append(
-                Image.frombytes(
-                    "RGB",
-                    [
-                        pix.width,
-                        pix.height
-                    ],
-                    pix.samples
-                )
-            )
-
-
-        doc.close()
-
-
-        return pages
-
-
-    except Exception:
-
-        return []
+    return []
 
 
 # ============================================================
@@ -1446,20 +1451,16 @@ def parse_omr_file(
             )
 
 
-            if (
-                not pil_images
-                and
-                pytesseract is not None
-            ):
+            if not pil_images:
 
-                st.warning(
-
-                    f"⚠️ Could not render "
-                    f"`{uploaded_file.name}` "
-                    "for OMR vision reading. "
-                    "Install pdf2image/Poppler "
-                    "or PyMuPDF on the server."
+                st.error(
+                    f"❌ PDF rendering failed for "
+                    f"`{uploaded_file.name}`. "
+                    "The server needs PyMuPDF (fitz). "
+                    "Check that `PyMuPDF` is present in requirements.txt."
                 )
+
+                return {}
 
 
             # -----------------------------------------------
@@ -1494,94 +1495,143 @@ def parse_omr_file(
 
         if pil_images:
 
-            responses, diag = (
-                process_image_cv_omr(
-                    pil_images[0],
-                    return_diagnostics=True
-                )
-            )
+            best_responses = {}
+            best_diag = None
 
+            # Test every rendered page and keep the page with
+            # the highest number of confidently detected answers.
+            for page_index, page_image in enumerate(pil_images):
 
-            detected = diag.get(
-                "detected_count",
-                0
-            )
-
-
-            ambiguous = diag.get(
-                "ambiguous",
-                []
-            )
-
-
-            unattempted = diag.get(
-                "unattempted",
-                []
-            )
-
-
-            # ------------------------------------------------
-            # GOOD RESULT
-            # ------------------------------------------------
-
-            if detected >= 40:
-
-                if ambiguous:
-
-                    st.warning(
-
-                        "⚠️ OMR reader found "
-                        "ambiguous/multiple marks in "
-                        +
-                        ", ".join(
-                            f"Q{q}"
-                            for q
-                            in ambiguous
-                        )
-                        +
-                        ". Those questions were "
-                        "not guessed and need review."
+                page_responses, page_diag = (
+                    process_image_cv_omr(
+                        page_image,
+                        return_diagnostics=True
                     )
-
-
-                if unattempted:
-
-                    st.info(
-
-                        "ℹ️ Unattempted/blank "
-                        "questions detected: "
-                        +
-                        ", ".join(
-                            f"Q{q}"
-                            for q
-                            in unattempted
-                        )
-                    )
-
-
-                st.success(
-
-                    f"✅ OMR vision read completed: "
-                    f"{detected}/50 marked responses "
-                    "detected from the BPSC answer grid."
                 )
 
+                if (
+                    best_diag is None
+                    or
+                    page_diag.get("detected_count", 0)
+                    >
+                    best_diag.get("detected_count", 0)
+                ):
+                    best_responses = page_responses
+                    best_diag = page_diag
 
-                return responses
+            if best_diag is not None:
 
+                detected = best_diag.get(
+                    "detected_count",
+                    0
+                )
 
-            # ------------------------------------------------
-            # LOW DETECTION
-            # ------------------------------------------------
+                ambiguous = best_diag.get(
+                    "ambiguous",
+                    []
+                )
 
-            st.warning(
+                unattempted = best_diag.get(
+                    "unattempted",
+                    []
+                )
 
-                f"⚠️ BPSC template reader "
-                f"detected only {detected}/50 "
-                "responses with sufficient confidence. "
-                "Trying fallback reading."
-            )
+                # ------------------------------------------------
+                # SUCCESSFUL OMR READ
+                # ------------------------------------------------
 
+                if detected >= 40:
+
+                    if ambiguous:
+
+                        st.warning(
+                            "⚠️ OMR reader found ambiguous "
+                            "marks in "
+                            +
+                            ", ".join(
+                                f"Q{q}"
+                                for q in ambiguous
+                            )
+                            +
+                            ". These questions were not guessed."
+                        )
+
+                    if unattempted:
+
+                        st.info(
+                            "ℹ️ Blank/unattempted questions: "
+                            +
+                            ", ".join(
+                                f"Q{q}"
+                                for q in unattempted
+                            )
+                        )
+
+                    st.success(
+                        f"✅ OMR vision read completed: "
+                        f"{detected}/50 responses detected."
+                    )
+
+                    # Visible diagnostic table so the reader can
+                    # be verified before scoring.
+                    detected_rows = []
+
+                    for q_no in range(1, 51):
+
+                        detected_rows.append({
+                            "Q": q_no,
+                            "Detected Answer":
+                                best_responses.get(
+                                    q_no,
+                                    "Unattempted"
+                                ),
+                            "Confidence":
+                                best_diag.get(
+                                    "confidence",
+                                    {}
+                                ).get(
+                                    q_no,
+                                    {}
+                                ).get(
+                                    "best",
+                                    0.0
+                                )
+                        })
+
+                    with st.expander(
+                        "🔎 Verify detected OMR answers before scoring",
+                        expanded=False
+                    ):
+
+                        st.dataframe(
+                            pd.DataFrame(
+                                detected_rows
+                            ),
+                            hide_index=True,
+                            use_container_width=True
+                        )
+
+                    return best_responses
+
+                # ------------------------------------------------
+                # LOW DETECTION
+                # ------------------------------------------------
+
+                st.warning(
+                    f"⚠️ BPSC OMR reader detected only "
+                    f"{detected}/50 responses. "
+                    "The score will NOT silently treat the "
+                    "whole sheet as blank."
+                )
+
+                # Do not fall through to a bad legacy result
+                # when the actual OMR image was successfully read.
+                if detected == 0:
+                    st.error(
+                        "❌ No OMR bubbles were detected. "
+                        "Check PDF rendering/template alignment."
+                    )
+                    return {}
 
         # ====================================================
         # OCR FALLBACK
