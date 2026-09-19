@@ -1383,94 +1383,11 @@ def _extract_text_responses(
 # ============================================================
 
 
-def _normalize_identity_name(value):
-    """Normalize OCR name text for cross-sheet comparison."""
-    if not value:
-        return ""
-
-    value = str(value).upper()
-    value = re.sub(r"[^A-Z0-9 ]+", " ", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
-
-
 def _normalize_roll_number(value):
     """Keep only digits so OCR punctuation/spaces do not break matching."""
     if not value:
         return ""
     return re.sub(r"\D", "", str(value))
-
-
-def _name_from_targeted_ocr(image):
-    """Read the handwritten candidate name from the fixed OMR name box.
-
-    The supplied OMR has red printed labels and black handwritten text.  OCR
-    works much better when the black handwriting is isolated from the red
-    template before recognition.
-    """
-    if pytesseract is None or image is None:
-        return ""
-
-    w, h = image.size
-    box = (
-        int(w * 0.105),
-        int(h * 0.076),
-        int(w * 0.825),
-        int(h * 0.097),
-    )
-    crop = image.crop(box).convert("RGB")
-    # The application's PDF renderer uses 300 DPI.  Upsampling also helps
-    # when the user uploads a lower-resolution PNG/JPEG.
-    crop = crop.resize((crop.width * 2, crop.height * 2))
-    rgb = np.array(crop)
-    r, g, b = cv2.split(rgb)
-
-    # Keep dark neutral/black ink and suppress the red printed template.
-    ink_mask = ((r < 120) & (g < 120) & (b < 120)).astype(np.uint8) * 255
-    candidates = []
-    for arr in (ink_mask, 255 - ink_mask):
-        for psm in (6, 7):
-            try:
-                text = pytesseract.image_to_string(
-                    arr,
-                    config=(
-                        f"--psm {psm} "
-                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "
-                    ),
-                )
-            except Exception:
-                continue
-
-            cleaned = _normalize_identity_name(text)
-            # Remove very short OCR debris, but preserve the student's words.
-            words = [w for w in cleaned.split() if len(re.sub(r"[^A-Z]", "", w)) >= 2]
-            cleaned = " ".join(words)
-            letters = re.sub(r"[^A-Z]", "", cleaned)
-            if len(letters) >= 5:
-                candidates.append(cleaned)
-
-    if not candidates:
-        return ""
-
-    # Prefer a multi-word/long candidate.  Cross-sheet fuzzy matching below
-    # handles small OCR differences such as RAHULKOUMAR vs FRAHULKUMMAR.
-    candidates.sort(
-        key=lambda x: (
-            1 if len(x.split()) >= 2 else 0,
-            len(re.sub(r"[^A-Z]", "", x)),
-        ),
-        reverse=True,
-    )
-    return candidates[0]
-
-
-def _name_similarity(a, b):
-    """Return a 0-1 similarity score for OCR names."""
-    a = _normalize_identity_name(a).replace(" ", "")
-    b = _normalize_identity_name(b).replace(" ", "")
-    if not a or not b:
-        return 0.0
-    return SequenceMatcher(None, a, b).ratio()
 
 
 def _extract_roll_from_bubbles(image):
@@ -1527,38 +1444,6 @@ def _extract_roll_from_bubbles(image):
         return ""
 
     return "".join(digits)
-
-
-def _extract_name_from_ocr(text):
-    """Legacy full-page fallback for templates where targeted OCR is unavailable."""
-    if not text:
-        return ""
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    label_pattern = re.compile(
-        r"(?:CANDIDATE\s+)?NAME(?:\s*OF\s*CANDIDATE)?",
-        re.I,
-    )
-
-    for i, line in enumerate(lines):
-        match = label_pattern.search(line)
-        if not match:
-            continue
-
-        value = line[match.end():].strip(" :-_=|\t")
-        value = re.sub(r"^(?:MR|MS|MRS|MISS)\.?\s+", "", value, flags=re.I)
-        value = re.sub(r"[^A-Za-z .'-]", " ", value)
-        value = re.sub(r"\s+", " ", value).strip()
-        if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
-            return _normalize_identity_name(value)
-
-        if i + 1 < len(lines):
-            value = re.sub(r"[^A-Za-z .'-]", " ", lines[i + 1])
-            value = re.sub(r"\s+", " ", value).strip()
-            if len(re.sub(r"[^A-Za-z]", "", value)) >= 3:
-                return _normalize_identity_name(value)
-
-    return ""
 
 
 def _extract_booklet_set(image, valid_sets=None):
@@ -1626,9 +1511,14 @@ def _extract_booklet_set(image, valid_sets=None):
 
 
 def extract_omr_identity(uploaded_file, valid_sets=None):
-    """Extract name, roll number and booklet set from one OMR file."""
+    """Extract only the bubbled roll number and booklet set from an OMR file.
+
+    Candidate name is intentionally NOT detected or stored.  The roll number
+    is used only as the private six-sheet identity key; public output uses a
+    separate random anonymous ID.
+    """
     if uploaded_file is None:
-        return {"name": "", "roll_no": "", "booklet_set": "", "raw_ocr": ""}
+        return {"roll_no": "", "booklet_set": "", "raw_ocr": ""}
 
     file_bytes = uploaded_file.getvalue()
     file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
@@ -1653,48 +1543,28 @@ def extract_omr_identity(uploaded_file, valid_sets=None):
             images = _render_pdf_pages(file_bytes)
 
         if not images:
-            return {"name": "", "roll_no": "", "raw_ocr": extracted_text}
+            return {"roll_no": "", "booklet_set": "", "raw_ocr": extracted_text}
 
-        # Use all rendered pages for identity, not just the page chosen for answers.
-        ocr_parts = []
-        if extracted_text.strip():
-            ocr_parts.append(extracted_text)
-
-        for image in images:
-            page_text = _ocr_identity_text(image)
-            if page_text:
-                ocr_parts.append(page_text)
-
-        combined_text = "\n".join(ocr_parts)
-
-        # The candidate name is handwritten, so OCR only the name box.
-        # The roll number is bubble-coded; do NOT use the printed OMR Sheet No.
-        # because that number can differ between papers for the same student.
+        # Only the first OMR page is used for the identity fields.
+        # The printed OMR Sheet No. is deliberately ignored.
         first_image = images[0]
-        detected_name = _name_from_targeted_ocr(first_image)
         detected_roll = _extract_roll_from_bubbles(first_image)
         detected_booklet_set = _extract_booklet_set(
             first_image,
             valid_sets=valid_sets,
         )
 
-        # Keep the old OCR parser only as a name fallback for alternate templates.
-        if not detected_name:
-            detected_name = _extract_name_from_ocr(combined_text)
-
         return {
-            "name": detected_name,
             "roll_no": detected_roll,
             "booklet_set": detected_booklet_set,
-            "raw_ocr": combined_text,
+            "raw_ocr": extracted_text,
         }
 
     except Exception as exc:
         return {
-            "name": "",
             "roll_no": "",
             "booklet_set": "",
-            "raw_ocr": f"IDENTITY OCR ERROR: {exc}",
+            "raw_ocr": f"OMR ID ERROR: {exc}",
         }
 
 
@@ -2241,10 +2111,7 @@ def render_marksheet(
 
 
     st.subheader(
-
-        f"📄 BPSC Official Scorecard: "
-        f"{record['name']} "
-        f"(Roll No: {record['roll_no']})"
+        f"📄 BPSC Official Scorecard: Anonymous ID {record.get('public_id', 'N/A')}"
     )
 
 
@@ -2435,8 +2302,8 @@ def render_marksheet(
 
     direct_link = (
         f"{base_url}"
-        f"?roll_no="
-        f"{record['roll_no']}"
+        f"?public_id="
+        f"{record.get('public_id', '')}"
     )
 
 
@@ -2470,9 +2337,9 @@ st.title(
 query_params = st.query_params
 
 
-url_roll_no = query_params.get(
-    "roll_no",
-    None
+url_public_id = query_params.get(
+    "public_id",
+    ""
 )
 
 
@@ -2502,10 +2369,10 @@ with tabs[0]:
 
 
     st.info(
-        "ℹ️ Candidate name and roll number are read automatically "
+        "ℹ️ The roll number is read automatically from the OMR bubbles "
         "from the OMR sheets. You do not need to enter them manually. "
         "All six OMR sheets are required, and all six must contain the "
-        "same name and roll number before a marksheet can be published."
+        "the same roll number before a marksheet can be published."
     )
 
     st.divider()
@@ -2642,61 +2509,42 @@ with tabs[0]:
                 valid_sets=list(OFFICIAL_KEYS[code].keys()),
             )
 
-        normalized_identities = {}
+        normalized_rolls = {}
         identity_rows = []
 
         for code, identity in identity_results.items():
-            normalized_identities[code] = {
-                "name": _normalize_identity_name(identity.get("name", "")),
-                "roll_no": _normalize_roll_number(identity.get("roll_no", "")),
-            }
+            normalized_rolls[code] = _normalize_roll_number(
+                identity.get("roll_no", "")
+            )
             identity_rows.append({
                 "Paper": code,
-                "Name detected from OMR": identity.get("name") or "NOT DETECTED",
                 "Roll number detected from OMR": identity.get("roll_no") or "NOT DETECTED",
                 "Booklet set detected from OMR": identity.get("booklet_set") or "NOT DETECTED",
                 "Answer key selected": omr_sets[code],
             })
 
-        st.write("### 🔎 OMR Identity Verification")
+        st.write("### 🔎 OMR Roll Number Verification")
         st.dataframe(
             pd.DataFrame(identity_rows),
             hide_index=True,
             use_container_width=True,
         )
 
-        identity_values = list(normalized_identities.values())
-        all_identity_present = all(
-            item["name"] and item["roll_no"]
-            for item in identity_values
+        roll_values = list(normalized_rolls.values())
+        all_rolls_present = all(bool(value) for value in roll_values)
+        same_roll = (
+            all_rolls_present
+            and len(set(roll_values)) == 1
         )
 
-        # Roll number must match exactly because it is read from the OMR
-        # bubbles.  Handwritten-name OCR can contain small character errors,
-        # so compare names fuzzily rather than rejecting the same student for
-        # OCR differences.
-        reference_name = identity_values[0]["name"] if identity_values else ""
-        name_matches = all(
-            _name_similarity(reference_name, item["name"]) >= 0.70
-            for item in identity_values
-        ) if all_identity_present else False
-
-        same_identity = (
-            all_identity_present
-            and name_matches
-            and len({item["roll_no"] for item in identity_values}) == 1
-        )
-
-        if not same_identity:
+        if not same_roll:
             st.error(
                 "❌ Marksheet NOT published. The six OMR sheets do not have "
-                "the same valid student identity. The bubbled roll number must "
-                "match exactly, and the handwritten name must match after OCR "
-                "normalization."
+                "the same valid bubbled roll number."
             )
             st.warning(
-                "Please re-upload/correct the OMR sheets. No score was saved "
-                "to the database and no rank was generated."
+                "Only the bubbled roll number is used for student identity. "
+                "No score was saved and no rank was generated."
             )
             st.stop()
 
@@ -2739,12 +2587,9 @@ with tabs[0]:
             )
             st.stop()
 
-        # Identity and answer-key set are now both verified before scoring.
-        # Keep the display name as detected from the first OMR sheet; use
-        # normalized values only for matching/validation.
-        first_code = next(iter(SUBJECT_META))
-        student_name = identity_results[first_code]["name"]
-        roll_no = identity_values[0]["roll_no"]
+        # Roll number and answer-key set are now verified before scoring.
+        # The real roll number remains private and is never shown publicly.
+        roll_no = roll_values[0]
 
         paper_results = {}
 
@@ -2917,9 +2762,8 @@ with tabs[0]:
 
         new_entry = {
 
-            "name":
-                student_name,
-
+            # No candidate name is detected or stored from the OMR.
+            # The real roll number is retained only as a private identity key.
             "roll_no":
                 roll_no,
 
@@ -3012,18 +2856,9 @@ with tabs[0]:
 
 
         saved_record = next(
-
             item
-
             for item in db
-
-            if str(
-                item["roll_no"]
-            )
-            ==
-            str(
-                roll_no
-            )
+            if str(item.get("public_id", "")) == str(new_entry.get("public_id", ""))
         )
 
 
@@ -3051,21 +2886,14 @@ with tabs[1]:
     )
 
 
-    search_roll = st.text_input(
-
-        "Enter Candidate Roll Number:",
-
-        value=
-            url_roll_no
-            if url_roll_no
-            else "",
-
-        placeholder=
-            "e.g. 10843"
+    search_public_id = st.text_input(
+        "Enter Anonymous ID:",
+        value=url_public_id if url_public_id else "",
+        placeholder="e.g. 583214"
     )
 
 
-    if search_roll.strip():
+    if search_public_id.strip():
 
         db = load_data()
         ids_changed = ensure_public_ids(db)
@@ -3088,11 +2916,11 @@ with tabs[1]:
                 for item in db
 
                 if str(
-                    item["roll_no"]
+                    item.get("public_id", "")
                 ).strip().lower()
                 ==
                 str(
-                    search_roll
+                    search_public_id
                 ).strip().lower()
             ),
 
@@ -3113,10 +2941,7 @@ with tabs[1]:
         else:
 
             st.error(
-
-                f"No marksheets found "
-                f"for Roll Number: "
-                f"`{search_roll}`"
+                f"No marksheets found for Anonymous ID: `{search_public_id}`"
             )
 
 
@@ -3177,9 +3002,7 @@ with tabs[2]:
                         "N/A"
                     ),
 
-                "Candidate Name":
-                    item["name"],
-
+                # Candidate name is intentionally not published.
                 # Never expose the real OMR roll number in the public
                 # leaderboard. This random ID is unique across all
                 # published records and is not derived from the roll number.
