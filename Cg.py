@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import secrets
 from difflib import SequenceMatcher
 import cv2
 import numpy as np
@@ -637,6 +638,44 @@ def save_data(db):
             f,
             indent=4
         )
+
+
+def generate_unique_public_id(db):
+    """Generate a persistent random numeric ID for public display.
+
+    The real OMR roll number remains private and is never used in the
+    public leaderboard. The generated ID is stored with the record so
+    it remains stable until that record is replaced.
+    """
+    used = {
+        str(item.get("public_id", "")).strip()
+        for item in db
+        if item.get("public_id")
+    }
+
+    while True:
+        candidate = str(secrets.randbelow(900000) + 100000)
+        if candidate not in used:
+            return candidate
+
+
+def ensure_public_ids(db):
+    """Backfill unique public IDs for older verified records."""
+    used = set()
+    changed = False
+
+    for item in db:
+        public_id = str(item.get("public_id", "")).strip()
+        if public_id and public_id not in used:
+            used.add(public_id)
+        else:
+            item["public_id"] = generate_unique_public_id(
+                [{"public_id": value} for value in used]
+            )
+            used.add(item["public_id"])
+            changed = True
+
+    return changed
 
 
 # ============================================================
@@ -2884,6 +2923,11 @@ with tabs[0]:
             "roll_no":
                 roll_no,
 
+            # Public anonymous identifier. The actual roll number is
+            # retained only for private identity verification/lookup.
+            "public_id":
+                generate_unique_public_id(db),
+
             "papers":
                 paper_results,
 
@@ -2983,11 +3027,17 @@ with tabs[0]:
         )
 
 
+        verified_count = sum(
+            1
+            for item in db
+            if item.get("identity_verified", False) is True
+        )
+
         render_marksheet(
 
             saved_record,
 
-            len(db)
+            verified_count
         )
 
 # ============================================================
@@ -3018,6 +3068,15 @@ with tabs[1]:
     if search_roll.strip():
 
         db = load_data()
+        ids_changed = ensure_public_ids(db)
+        if ids_changed:
+            save_data(db)
+
+        verified_count = sum(
+            1
+            for item in db
+            if item.get("identity_verified", False) is True
+        )
 
 
         record = next(
@@ -3047,7 +3106,7 @@ with tabs[1]:
 
                 record,
 
-                len(db)
+                verified_count
             )
 
 
@@ -3072,9 +3131,14 @@ with tabs[2]:
     )
 
 
+    all_db = load_data()
+    ids_changed = ensure_public_ids(all_db)
+    if ids_changed:
+        save_data(all_db)
+
     db = [
         item
-        for item in load_data()
+        for item in all_db
         if item.get("identity_verified", False) is True
     ]
 
@@ -3116,8 +3180,11 @@ with tabs[2]:
                 "Candidate Name":
                     item["name"],
 
-                "Roll Number":
-                    item["roll_no"],
+                # Never expose the real OMR roll number in the public
+                # leaderboard. This random ID is unique across all
+                # published records and is not derived from the roll number.
+                "Anonymous ID":
+                    item.get("public_id", "N/A"),
 
                 "Status":
                     (
