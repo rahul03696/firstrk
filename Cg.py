@@ -1447,89 +1447,123 @@ def _extract_roll_from_bubbles(image):
 
 
 def _normalize_booklet_set(value):
-    """Normalize an OMR booklet label for an exact response/key comparison.
+    """Normalize the *Question Booklet Series* for exact OMR/key matching.
 
-    The OMR response sheet may expose only the letter (for example ``J``),
-    while the answer-key dictionary uses ``Set-J``. Both represent the same
-    booklet. Anything else remains distinct, so a wrong booklet cannot pass
-    the publication gate merely because of formatting.
+    Important: answer-key labels may contain an internal key/set number, e.g.
+    ``Set-J (Set-2)``.  The booklet series is the FIRST ``Set-<token>`` value,
+    so that label must normalize to ``SET-J`` rather than ``SET-2``.
     """
     text = str(value or "").strip().upper()
     if not text:
         return ""
-    # Accept forms such as J, SET-J, BOOKLET-J, BOOKLET SERIES J.
-    match = re.search(r"(?:BOOKLET\s*(?:SERIES)?|SET)\s*[-:]?\s*([A-Z0-9]+)$", text)
+
+    # Prefer the explicit booklet-series label anywhere in the value.
+    # Examples: "SET-J", "Set-J (Set-2)", "BOOKLET SERIES J".
+    match = re.search(
+        r"\b(?:BOOKLET\s*SERIES|BOOKLET|SET)\s*[-:]?\s*([A-Z])\b",
+        text,
+    )
     if match:
-        token = match.group(1)
-    else:
-        token_match = re.search(r"([A-Z0-9]+)$", text)
-        token = token_match.group(1) if token_match else text
-    return f"SET-{token}"
+        return f"SET-{match.group(1)}"
+
+    # A response-sheet detector may return only the single letter.
+    single = re.fullmatch(r"[A-Z]", text)
+    if single:
+        return f"SET-{text}"
+
+    # Last-resort single-letter extraction, but never use a numeric internal
+    # key/set number as the booklet series.
+    letters = re.findall(r"\b([A-Z])\b", text)
+    if letters:
+        return f"SET-{letters[0]}"
+
+    return ""
 
 
 def _extract_booklet_set(image, valid_sets=None):
-    """Read the printed Question Booklet Series from the OMR sheet.
+    """Read the large printed Question Booklet Series letter from the OMR.
 
-    The response sheet contains a large booklet-series letter (for example J)
-    near the top-center of the page.  This is deliberately read from the OMR
-    itself so a user cannot accidentally score a Set-J response sheet against
-    a different answer-key set.
+    The supplied BPSC response sheet has a large single booklet letter (J, F,
+    etc.) in the centre-top booklet box.  OCR is restricted to that letter
+    region and to valid booklet letters so the watermark and surrounding
+    printed text cannot be mistaken for the booklet series.
     """
     if image is None or pytesseract is None:
         return ""
 
-    valid_sets = valid_sets or []
     valid_letters = {
         str(item).strip().upper()[-1]
-        for item in valid_sets
+        for item in (valid_sets or [])
         if str(item).strip()
     }
+    valid_letters = {x for x in valid_letters if x.isalpha()}
     if not valid_letters:
         valid_letters = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
     rgb = image.convert("RGB")
     w, h = rgb.size
 
-    # The supplied BPSC template places the large booklet letter in this box.
-    crop = rgb.crop((
-        int(0.47 * w),
-        int(0.16 * h),
-        int(0.66 * w),
-        int(0.31 * h),
-    ))
-    # Upscale the large booklet letter for more reliable OCR.
-    crop = crop.resize((crop.width * 3, crop.height * 3))
-
-    variants = [crop]
-    gray = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2GRAY)
-    variants.append(Image.fromarray(gray))
-    _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variants.append(Image.fromarray(threshold))
+    # The large booklet letter is around x=0.49..0.61 and y=0.19..0.29
+    # on the supplied template.  Use several slightly different tight crops
+    # to tolerate PDF/image scaling and small page shifts.
+    boxes = [
+        (0.475, 0.175, 0.625, 0.305),
+        (0.485, 0.185, 0.615, 0.300),
+        (0.490, 0.190, 0.610, 0.295),
+    ]
 
     candidates = []
-    for variant in variants:
-        for psm in (6, 10, 11, 13):
-            try:
-                text = pytesseract.image_to_string(
-                    variant,
-                    config=f"--psm {psm}",
-                ).upper()
-            except Exception:
-                continue
+    for left, top, right, bottom in boxes:
+        crop = rgb.crop((
+            int(left * w), int(top * h),
+            int(right * w), int(bottom * h),
+        ))
+        crop = crop.resize((crop.width * 5, crop.height * 5), Image.Resampling.LANCZOS)
+        arr = np.array(crop)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
-            # Prefer an isolated valid set letter.
-            tokens = re.findall(r"[A-Z]", text)
-            for token in tokens:
-                if token in valid_letters:
-                    candidates.append(token)
+        variants = [gray]
+        # Otsu and adaptive threshold variants help with scanned sheets and
+        # watermark/background variation.
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.append(otsu)
+        adaptive = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 11
+        )
+        variants.append(adaptive)
+
+        for variant in variants:
+            pil_variant = Image.fromarray(variant)
+            for psm in (6, 10, 13):
+                try:
+                    text = pytesseract.image_to_string(
+                        pil_variant,
+                        config=(
+                            f"--psm {psm} "
+                            f"-c tessedit_char_whitelist={''.join(sorted(valid_letters))}"
+                        ),
+                    ).upper()
+                except Exception:
+                    continue
+
+                # For this field the answer should be one large letter.  Count
+                # only valid letters and ignore punctuation/watermark text.
+                for token in re.findall(r"[A-Z]", text):
+                    if token in valid_letters:
+                        candidates.append(token)
 
     if not candidates:
         return ""
 
-    # Most frequent OCR candidate wins.
+    # Require a stable winner.  This prevents a single noisy OCR result from
+    # silently selecting the wrong booklet.
     counts = Counter(candidates)
-    return counts.most_common(1)[0][0]
-
+    best, best_count = counts.most_common(1)[0]
+    second_count = counts.most_common(2)[1][1] if len(counts) > 1 else 0
+    if best_count < 2 or best_count < second_count + 1:
+        return ""
+    return best
 
 def extract_omr_identity(uploaded_file, valid_sets=None):
     """Extract only the bubbled roll number and booklet set from an OMR file.
