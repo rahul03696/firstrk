@@ -788,7 +788,22 @@ def render_marksheet(record, total_candidates, paper_results=None, database_save
     )
 
     st.markdown(
-        f"<div class='anon-id'>{record.get('public_id', 'SESSION RESULT')}</div>",
+        f"""
+        <div style="margin:6px 0 10px 0;">
+            <div style="font-size:.72rem; font-weight:800; color:#64748b;
+                        letter-spacing:.05em; text-transform:uppercase;">
+                Your Anonymous ID
+            </div>
+            <div class='anon-id' style="font-size:1.35rem; font-weight:800;
+                                        color:#172033;">
+                {record.get('public_id', 'SESSION RESULT')}
+            </div>
+            <div style="font-size:.72rem; color:#64748b; margin-top:2px;">
+                This is an anonymous ID, not your roll number. Save it to
+                check your rank later.
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
