@@ -797,7 +797,7 @@ def render_marksheet(record, total_candidates):
 st.set_page_config(
 
     page_title=
-        "BPSC Merit Rank Portal",
+        "BPSC OMR Marksheet Portal",
 
     layout="wide",
 
@@ -806,8 +806,8 @@ st.set_page_config(
 
 
 st.title(
-    "📝 BPSC Student OMR "
-    "Merit Rank Portal"
+    "📝 BPSC OMR "
+    "Marksheet Portal"
 )
 
 st.markdown(
@@ -896,10 +896,10 @@ st.markdown(
     """
     <div class="privacy-hero">
         <div class="privacy-lock">🔒</div>
-        <h2>Private &amp; Secure Merit Rank Portal</h2>
+        <h2>Upload OMR → Get Your Marksheet</h2>
         <p class="privacy-lead">
-            Your OMR information is used only to calculate your merit result.
-            We do not publish your OMR responses or question-wise analysis.
+            Upload your six OMR sheets below. The system reads them, checks the
+            booklet series, calculates your marks and generates your result.
         </p>
     </div>
     """,
@@ -910,37 +910,14 @@ st.markdown(
     """
     <div class="privacy-grid">
         <div class="privacy-box">
-            <div class="privacy-icon">🛡️</div>
-            <h4>No public OMR storage</h4>
-            <p>
-                Your uploaded OMR sheet is not published or displayed as a
-                public record. The ranking database stores only the minimum
-                information required for the merit list.
-            </p>
-        </div>
-        <div class="privacy-box">
-            <div class="privacy-icon">👁️</div>
-            <h4>Your detailed data is private</h4>
-            <p>
-                Your OMR responses, right/wrong question analysis, answer key,
-                and detailed scorecard are not shown to students or published.
-            </p>
-        </div>
-        <div class="privacy-box">
-            <div class="privacy-icon">🏆</div>
-            <h4>Only merit ranking is published</h4>
-            <p>
-                The public result contains only your Anonymous ID, Merit Marks,
-                and Rank. Your personal identity is not displayed in the rank list.
-            </p>
-        </div>
-        <div class="privacy-box">
             <div class="privacy-icon">🔐</div>
-            <h4>Minimal protected record</h4>
-            <p>
-                Only the information necessary to maintain the current merit
-                ranking is retained in the protected ranking database.
-            </p>
+            <h4>Private & Secure</h4>
+            <p>Your uploaded OMR files are processed for evaluation and are not stored in the ranking database.</p>
+        </div>
+        <div class="privacy-box">
+            <div class="privacy-icon">⚡</div>
+            <h4>Quick Result</h4>
+            <p>Upload the required sheets, verify the booklet series, and generate your marksheet in one step.</p>
         </div>
     </div>
     """,
@@ -948,16 +925,8 @@ st.markdown(
 )
 
 st.info(
-    "📌 **What you will receive:** After your OMR is processed, the portal "
-    "will show only your **Anonymous ID and current Rank**. The public merit "
-    "list will show only **Rank, Anonymous ID, and Merit Marks**. "
-    "No right/wrong question analysis will be provided."
-)
-
-st.warning(
-    "🔒 **Privacy promise:** Your OMR responses and detailed evaluation are "
-    "not published through this portal. The system is designed to minimize "
-    "stored information and protect the ranking data."
+    "📌 **Only 2 things to remember:** Upload your OMR sheets and select the "
+    "correct booklet series printed on each sheet. Then tap **Generate Marksheet**."
 )
 
 
@@ -990,26 +959,19 @@ tabs = st.tabs([
 
 with tabs[0]:
 
-    st.subheader(
-        "Candidate Identity & OMR Sheet Submission"
+    st.subheader("📤 Upload Your OMR Sheets")
+
+    st.markdown(
+        """
+        ### Follow these 3 simple steps
+        **1. Upload** all 6 OMR response sheets (PDF/JPG/PNG).  
+        **2. Select** the Question Booklet Series printed on each sheet.  
+        **3. Tap** **🚀 Generate Marksheet** — your result is calculated automatically.
+        """
     )
 
-
-    st.info(
-        "ℹ️ The roll number is read automatically from the OMR bubbles. "
-        "You do not need to enter it manually. The Question Booklet Series "
-        "must be confirmed MANUALLY for every paper by selecting the booklet "
-        "printed on that response sheet and ticking the confirmation box. "
-        "All six OMR sheets and all six booklet confirmations are required "
-        "before a marksheet can be published."
-    )
-
-    st.divider()
-
-    st.success(
-        "🔐 **Purpose of upload:** Your OMR is submitted only for merit "
-        "calculation. The portal does **not** provide right/wrong question "
-        "analysis or a detailed answer-by-answer marksheet after submission."
+    st.caption(
+        "Your roll number is read automatically from the OMR. You do not need to type it."
     )
 
     # The upload section is always enabled; identity comes only from OMR.
@@ -1109,6 +1071,17 @@ with tabs[0]:
                 )
 
 
+    uploaded_count = sum(1 for item in omr_files.values() if item is not None)
+    confirmed_count = sum(1 for item in booklet_confirmed.values() if item)
+
+    if uploaded_count == 6 and confirmed_count == 6:
+        st.success("✅ All 6 OMR sheets are uploaded and all booklet series are confirmed. You are ready to generate your marksheet.")
+    else:
+        st.info(
+            f"📋 Upload status: **{uploaded_count}/6 OMR sheets** • "
+            f"Booklet confirmation: **{confirmed_count}/6**"
+        )
+
     st.divider()
 
 
@@ -1118,10 +1091,13 @@ with tabs[0]:
 
     if st.button(
 
-        "🚀 Verify All Six OMR Sheets & Generate Marksheet",
+        "🚀 Generate My Marksheet",
 
         type="primary"
     ):
+
+        progress = st.progress(0, text="Starting OMR verification…")
+        status_box = st.empty()
 
         # =================================================
         # HARD GATE: EXACTLY SIX REQUIRED OMR SHEETS
@@ -1259,7 +1235,15 @@ with tabs[0]:
         # PROCESS EVERY PAPER
         # =================================================
 
-        for code, meta in SUBJECT_META.items():
+        total_papers = len(SUBJECT_META)
+
+        for paper_index, (code, meta) in enumerate(SUBJECT_META.items(), start=1):
+
+            status_box.info(f"⚙️ Processing {paper_index}/{total_papers}: {meta['name']}…")
+            progress.progress(
+                (paper_index - 1) / total_papers,
+                text=f"Processing {code} — {meta['name']}"
+            )
 
             selected_set = (
                 omr_sets[code]
@@ -1357,6 +1341,13 @@ with tabs[0]:
                 eval_res
             )
 
+            progress.progress(
+                paper_index / total_papers,
+                text=f"Completed {paper_index}/{total_papers}: {meta['name']}"
+            )
+
+
+        status_box.success("✅ All OMR sheets processed. Generating your marksheet…")
 
         # =================================================
         # OVERALL QUALIFICATION
