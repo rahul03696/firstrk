@@ -3,6 +3,7 @@ import json
 import os
 import re
 import secrets
+import hashlib
 from difflib import SequenceMatcher
 import cv2
 import numpy as np
@@ -51,21 +52,15 @@ except ImportError:
 # IMPORTANT: set OMR_DATABASE_KEY as a Streamlit secret or environment
 # variable. Never hard-code it in this source file and never commit it.
 ENCRYPTED_ENCRYPTED_DATA_FILE = "bpsc_leaderboard_secure.enc"
+
+# Encrypted ranking database key.
+# No administrator password is required to publish the merit list.
 OMR_DATABASE_KEY = os.environ.get("OMR_DATABASE_KEY", "")
 if not OMR_DATABASE_KEY:
     try:
         OMR_DATABASE_KEY = st.secrets.get("OMR_DATABASE_KEY", "")
     except Exception:
         OMR_DATABASE_KEY = ""
-
-# Optional administrator password for publishing/unpublishing the public merit list.
-# Keep this as a Streamlit secret/environment variable; never hard-code it in source.
-ADMIN_PUBLISH_PASSWORD = os.environ.get("ADMIN_PUBLISH_PASSWORD", "")
-if not ADMIN_PUBLISH_PASSWORD:
-    try:
-        ADMIN_PUBLISH_PASSWORD = st.secrets.get("ADMIN_PUBLISH_PASSWORD", "")
-    except Exception:
-        ADMIN_PUBLISH_PASSWORD = ""
 
 MAX_UPLOAD_MB = 15
 
@@ -711,7 +706,27 @@ def load_data():
                 "merit_max": merit_max,
                 "published": bool(item.get("published", False)),
             })
-        return clean
+
+        # Canonicalize the database:
+        # - exactly one record per roll number
+        # - exactly one anonymous ID per record
+        # - if duplicate roll numbers exist, keep the last stored record
+        # - if an anonymous ID is duplicated, assign a fresh ID to the later record
+        by_roll = {}
+        for item in clean:
+            by_roll[item["roll_no"]] = item
+
+        canonical = []
+        used_public_ids = set()
+        for item in by_roll.values():
+            public_id = item["public_id"]
+            if public_id in used_public_ids:
+                public_id = generate_unique_public_id(canonical)
+                item["public_id"] = public_id
+            used_public_ids.add(public_id)
+            canonical.append(item)
+
+        return canonical
 
     except InvalidToken:
         st.error(
@@ -727,16 +742,28 @@ def load_data():
 
 
 def save_data(db):
-    """Encrypt the minimal database before writing it to disk."""
-    minimal = []
+    """Canonicalize and encrypt the minimal ranking database."""
+    canonical = {}
     for item in db:
-        minimal.append({
-            "roll_no": str(item.get("roll_no", "")).strip(),
-            "public_id": str(item.get("public_id", "")).strip(),
+        roll_no = str(item.get("roll_no", "")).strip()
+        public_id = str(item.get("public_id", "")).strip()
+        if not roll_no or not public_id:
+            continue
+        canonical[roll_no] = {
+            "roll_no": roll_no,
+            "public_id": public_id,
             "merit_total": round(float(item.get("merit_total", 0)), 2),
             "merit_max": round(float(item.get("merit_max", 0)), 2),
             "published": bool(item.get("published", False)),
-        })
+        }
+
+    minimal = []
+    used_public_ids = set()
+    for item in canonical.values():
+        if item["public_id"] in used_public_ids:
+            item["public_id"] = generate_unique_public_id(minimal)
+        used_public_ids.add(item["public_id"])
+        minimal.append(item)
 
     payload = json.dumps(
         minimal,
@@ -1883,20 +1910,46 @@ if st.button(
             )
 
             if existing:
+                # One roll number must always keep ONE fixed Anonymous ID.
                 public_id = str(
                     existing.get("public_id") or generate_unique_public_id(db)
                 )
+
+                old_total = float(existing.get("merit_total", 0))
+                old_max = float(existing.get("merit_max", 0))
+
+                # IMPORTANT:
+                # If the same roll number checks/submits multiple times,
+                # retain the HIGHEST merit total ever recorded for that roll.
+                # A lower later submission must never reduce the candidate's
+                # stored marks or rank.
+                if merit_total > old_total:
+                    best_total = round(merit_total, 2)
+                    best_max = round(merit_max, 2)
+                else:
+                    best_total = round(old_total, 2)
+                    best_max = round(old_max, 2)
+
+                new_entry = {
+                    "roll_no": normalized_roll_no,
+                    "public_id": public_id,
+                    "merit_total": best_total,
+                    "merit_max": best_max,
+                    "published": True,
+                }
             else:
+                # First result for this roll number.
                 public_id = generate_unique_public_id(db)
+                new_entry = {
+                    "roll_no": normalized_roll_no,
+                    "public_id": public_id,
+                    "merit_total": round(merit_total, 2),
+                    "merit_max": round(merit_max, 2),
+                    "published": True,
+                }
 
-            new_entry = {
-                "roll_no": normalized_roll_no,
-                "public_id": public_id,
-                "merit_total": round(merit_total, 2),
-                "merit_max": round(merit_max, 2),
-                "published": False,
-            }
-
+            # Replace only this roll number's record, preserving exactly
+            # one record per candidate.
             db = [
                 item for item in db
                 if str(item.get("roll_no", "")).strip() != normalized_roll_no
@@ -1956,10 +2009,8 @@ if st.button(
     )
 
     if database_saved:
-        st.info(
-            "📌 This result is saved securely but is NOT public yet. "
-            "An administrator must publish the merit list from the "
-            "🏆 Merit Rank List tab."
+        st.success(
+            "📌 Result saved securely. The merit rank list is updated automatically."
         )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
@@ -2049,6 +2100,7 @@ with tabs[0]:
 
 # ============================================================
 # ============================================================
+# ============================================================
 # TAB 3
 # ============================================================
 
@@ -2056,135 +2108,59 @@ with tabs[1]:
 
     st.subheader("🏆 Merit Rank List")
     st.caption(
-        "Only records explicitly published by the administrator are shown. "
-        "Roll numbers and OMR details are never displayed."
+        "The merit list is generated automatically from stored results. "
+        "Only Rank, Anonymous ID and Merit Marks are displayed publicly."
     )
 
     if not OMR_DATABASE_KEY or Fernet is None:
-        st.info(
-            "Secure ranking storage is not configured. Configure "
-            "OMR_DATABASE_KEY before publishing the merit list."
+        st.warning(
+            "Secure ranking storage is not configured. Add OMR_DATABASE_KEY "
+            "to Streamlit Secrets so results can be stored between sessions."
         )
         all_db = []
     else:
         all_db = load_data()
 
-        # --------------------------------------------------------
-        # ADMIN PUBLICATION CONTROL
-        # --------------------------------------------------------
-        st.markdown("### 🔐 Administrator Publication")
-        st.write(
-            "Newly generated results remain private until the administrator "
-            "publishes them."
-        )
+        # All valid stored records are public automatically.
+        # Exactly one stored record represents exactly one roll number.
+        # Rank is ALWAYS calculated from that candidate's TOTAL MERIT MARKS
+        # across the complete merit papers, not from an individual paper.
+        for item in all_db:
+            item["published"] = True
 
-        admin_password = st.text_input(
-            "Administrator password",
-            type="password",
-            key="admin_publish_password",
-            help="Set ADMIN_PUBLISH_PASSWORD in Streamlit Secrets.",
-        )
-
-        admin_configured = bool(ADMIN_PUBLISH_PASSWORD)
-
-        if not admin_configured:
-            st.warning(
-                "ADMIN_PUBLISH_PASSWORD is not configured. Add it to "
-                "Streamlit Secrets before using the Publish button."
+        if all_db:
+            all_db.sort(
+                key=lambda x: (
+                    -float(x.get("merit_total", 0)),
+                    str(x.get("roll_no", "")).strip(),
+                )
             )
 
-        admin_authenticated = (
-            admin_configured
-            and bool(admin_password)
-            and admin_password == ADMIN_PUBLISH_PASSWORD
-        )
+            # Store the current rank on every candidate record.
+            # Equal merit totals receive consecutive ranks; the roll number
+            # is only a deterministic tie-break and is never displayed.
+            for rank_idx, item in enumerate(all_db, start=1):
+                item["rank"] = rank_idx
 
-        unpublished_count = sum(
-            1 for item in all_db if not bool(item.get("published", False))
-        )
-        published_count = sum(
-            1 for item in all_db if bool(item.get("published", False))
-        )
+            save_data(all_db)
 
-        c1, c2 = st.columns(2)
-        c1.metric("Published records", published_count)
-        c2.metric("Waiting for publication", unpublished_count)
-
-        if admin_authenticated:
-            b1, b2 = st.columns(2)
-
-            with b1:
-                if st.button(
-                    "📢 Publish Merit List",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=(not all_db),
-                ):
-                    for item in all_db:
-                        item["published"] = True
-
-                    all_db.sort(
-                        key=lambda x: float(x.get("merit_total", 0)),
-                        reverse=True,
-                    )
-                    save_data(all_db)
-                    st.success(
-                        "✅ Merit list published successfully. "
-                        "Published records are now visible below."
-                    )
-                    st.rerun()
-
-            with b2:
-                if st.button(
-                    "🔒 Unpublish All",
-                    use_container_width=True,
-                    disabled=(not all_db),
-                ):
-                    for item in all_db:
-                        item["published"] = False
-
-                    save_data(all_db)
-                    st.success(
-                        "🔒 Merit list unpublished. No records are currently public."
-                    )
-                    st.rerun()
-
-        elif admin_password:
-            st.error("Incorrect administrator password.")
-
-        st.divider()
-
-        # --------------------------------------------------------
-        # PUBLIC MERIT LIST
-        # --------------------------------------------------------
-        public_db = [
-            item for item in all_db
-            if bool(item.get("published", False))
-        ]
-
-        if not public_db:
-            st.info("No merit records have been published yet.")
+        if not all_db:
+            st.info("No merit records have been generated yet.")
         else:
-            public_db.sort(
-                key=lambda x: float(x.get("merit_total", 0)),
-                reverse=True,
-            )
-
             rows = []
-            for rank_idx, item in enumerate(public_db, start=1):
+            for item in all_db:
                 total = float(item.get("merit_total", 0))
                 max_marks = float(item.get("merit_max", 0))
-                percentage = (total / max_marks * 100) if max_marks else 0.0
+
                 rows.append(
                     {
-                        "Rank": rank_idx,
+                        "Rank": int(item.get("rank", 0)),
                         "Anonymous ID": item.get("public_id", "N/A"),
                         "Merit Marks": f"{total:.2f} / {max_marks:.2f}",
-                        "Percentage": f"{percentage:.2f}%",
                     }
                 )
 
-            st.markdown("### 🏆 Live Published Merit List")
+            st.markdown("### 🏆 Live Merit Rank List")
             st.dataframe(
                 pd.DataFrame(rows),
                 hide_index=True,
@@ -2192,6 +2168,8 @@ with tabs[1]:
             )
 
             st.caption(
-                "The public list contains only Rank, Anonymous ID, Merit Marks "
-                "and Percentage. Roll numbers and OMR details remain private."
+                "One Anonymous ID is permanently associated with one roll number. "
+                "If the same roll number is checked multiple times, only the "
+                "highest merit marks are retained for ranking. The roll number "
+                "itself is never displayed."
             )
