@@ -10,6 +10,12 @@ import pandas as pd
 from PIL import Image
 import streamlit as st
 
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:
+    Fernet = None
+    InvalidToken = Exception
+
 # ============================================================
 # OPTIONAL IMPORTS
 # ============================================================
@@ -41,7 +47,18 @@ except ImportError:
 # CONFIGURATION
 # ============================================================
 
-DATA_FILE = "bpsc_leaderboard_6papers.json"
+# Privacy/security configuration.
+# IMPORTANT: set OMR_DATABASE_KEY as a Streamlit secret or environment
+# variable. Never hard-code it in this source file and never commit it.
+ENCRYPTED_ENCRYPTED_DATA_FILE = "bpsc_leaderboard_secure.enc"
+OMR_DATABASE_KEY = os.environ.get("OMR_DATABASE_KEY", "")
+if not OMR_DATABASE_KEY:
+    try:
+        OMR_DATABASE_KEY = st.secrets.get("OMR_DATABASE_KEY", "")
+    except Exception:
+        OMR_DATABASE_KEY = ""
+
+MAX_UPLOAD_MB = 15
 
 OPTION_MAP = {
     0: "A",
@@ -615,1764 +632,161 @@ class OMREvaluationEngine:
 
 
 # ============================================================
-# DATABASE
+# DATABASE — PRIVACY-FIRST / ENCRYPTED AT REST
 # ============================================================
 
+def _get_fernet():
+    """Return the encryption object or fail closed.
+
+    The encryption key is deliberately NOT generated or stored by this app.
+    It must be supplied externally (environment variable or Streamlit secret).
+    This prevents the source code from containing the decryption key.
+    """
+    if Fernet is None:
+        st.error(
+            "Secure storage is unavailable: the 'cryptography' package is not installed."
+        )
+        st.stop()
+
+    if not OMR_DATABASE_KEY:
+        st.error(
+            "Secure storage is locked. The administrator must configure "
+            "OMR_DATABASE_KEY as a secret/environment variable before the app can run."
+        )
+        st.stop()
+
+    try:
+        key = OMR_DATABASE_KEY.encode("ascii")
+        return Fernet(key)
+    except Exception:
+        st.error(
+            "Secure storage is locked because OMR_DATABASE_KEY is invalid. "
+            "Use a valid Fernet key."
+        )
+        st.stop()
+
+
 def load_data():
+    """Load only the minimal encrypted ranking database.
 
-    if os.path.exists(DATA_FILE):
+    The file contains no OMR images, answer selections, answer keys,
+    question-level results, or English/Hindi marks.
+    """
+    if not os.path.exists(ENCRYPTED_ENCRYPTED_DATA_FILE):
+        return []
 
-        with open(DATA_FILE, "r") as f:
+    try:
+        encrypted = open(ENCRYPTED_ENCRYPTED_DATA_FILE, "rb").read()
+        decrypted = _get_fernet().decrypt(encrypted)
+        raw = json.loads(decrypted.decode("utf-8"))
 
-            return json.load(f)
+        # Defensive normalization: discard anything outside the approved
+        # minimal schema, including legacy fields if an old record is present.
+        clean = []
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            roll_no = str(item.get("roll_no", "")).strip()
+            public_id = str(item.get("public_id", "")).strip()
+            if not roll_no or not public_id:
+                continue
+            try:
+                merit_total = round(float(item.get("merit_total", 0)), 2)
+                merit_max = round(float(item.get("merit_max", 0)), 2)
+            except (TypeError, ValueError):
+                continue
+            clean.append({
+                "roll_no": roll_no,
+                "public_id": public_id,
+                "merit_total": merit_total,
+                "merit_max": merit_max,
+            })
+        return clean
 
-    return []
+    except InvalidToken:
+        st.error(
+            "The encrypted database could not be opened with the configured key. "
+            "No data was loaded."
+        )
+        st.stop()
+    except Exception as exc:
+        st.error(
+            f"Secure database could not be read. No data was loaded. ({type(exc).__name__})"
+        )
+        st.stop()
 
 
 def save_data(db):
+    """Encrypt the minimal database before writing it to disk."""
+    minimal = []
+    for item in db:
+        minimal.append({
+            "roll_no": str(item.get("roll_no", "")).strip(),
+            "public_id": str(item.get("public_id", "")).strip(),
+            "merit_total": round(float(item.get("merit_total", 0)), 2),
+            "merit_max": round(float(item.get("merit_max", 0)), 2),
+        })
 
-    with open(DATA_FILE, "w") as f:
+    payload = json.dumps(
+        minimal,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
-        json.dump(
-            db,
-            f,
-            indent=4
-        )
+    encrypted = _get_fernet().encrypt(payload)
+
+    # Atomic replacement reduces the chance of leaving a partially-written
+    # database if the process stops during a write.
+    tmp_file = ENCRYPTED_ENCRYPTED_DATA_FILE + ".tmp"
+    with open(tmp_file, "wb") as f:
+        f.write(encrypted)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp_file, ENCRYPTED_ENCRYPTED_DATA_FILE)
 
 
 def generate_unique_public_id(db):
-    """Generate a persistent random numeric ID for public display.
-
-    The real OMR roll number remains private and is never used in the
-    public leaderboard. The generated ID is stored with the record so
-    it remains stable until that record is replaced.
-    """
+    """Generate a random anonymous numeric ID."""
     used = {
         str(item.get("public_id", "")).strip()
         for item in db
-        if item.get("public_id")
     }
 
     while True:
-        candidate = str(secrets.randbelow(900000) + 100000)
+        candidate = f"{secrets.randbelow(1_000_000):06d}"
         if candidate not in used:
             return candidate
-
-
-def ensure_public_ids(db):
-    """Backfill unique public IDs for older verified records."""
-    used = set()
-    changed = False
-
-    for item in db:
-        public_id = str(item.get("public_id", "")).strip()
-        if public_id and public_id not in used:
-            used.add(public_id)
-        else:
-            item["public_id"] = generate_unique_public_id(
-                [{"public_id": value} for value in used]
-            )
-            used.add(item["public_id"])
-            changed = True
-
-    return changed
-
-
-# ============================================================
-# BPSC OMR TEMPLATE
-# ============================================================
-
-OMR_REFERENCE_WIDTH = 1191.0
-
-OMR_REFERENCE_HEIGHT = 1684.0
-
-
-# Bubble X positions.
-#
-# Five blocks.
-# Each block contains 10 questions.
-#
-# Every question has A/B/C/D.
-
-OMR_OPTION_X = [
-
-    [194, 216, 239, 262],
-
-    [376, 398, 421, 444],
-
-    [558, 580, 603, 626],
-
-    [740, 762, 785, 807],
-
-    [921, 944, 966, 989]
-]
-
-
-# Ten rows.
-
-OMR_ROW_Y = [
-    513,
-    547,
-    581,
-    615,
-    649,
-    683,
-    716,
-    750,
-    784,
-    818
-]
-
-
-# ============================================================
-# BUBBLE DARKNESS DETECTION
-# ============================================================
-
-def _dark_fraction(
-    gray,
-    cx,
-    cy,
-    radius
-):
-
-    h, w = gray.shape[:2]
-
-    cx = int(round(cx))
-
-    cy = int(round(cy))
-
-    radius = max(
-        2,
-        int(round(radius))
-    )
-
-
-    x1 = max(
-        0,
-        cx - radius
-    )
-
-    x2 = min(
-        w,
-        cx + radius + 1
-    )
-
-    y1 = max(
-        0,
-        cy - radius
-    )
-
-    y2 = min(
-        h,
-        cy + radius + 1
-    )
-
-
-    patch = gray[
-        y1:y2,
-        x1:x2
-    ]
-
-
-    if patch.size == 0:
-
-        return 0.0
-
-
-    yy, xx = np.ogrid[
-        :patch.shape[0],
-        :patch.shape[1]
-    ]
-
-
-    local_cx = cx - x1
-
-    local_cy = cy - y1
-
-
-    # Ignore outer printed bubble ring.
-
-    r = max(
-        2,
-        int(radius * 0.68)
-    )
-
-
-    mask = (
-        (xx - local_cx) ** 2
-        +
-        (yy - local_cy) ** 2
-        <= r ** 2
-    )
-
-
-    values = patch[mask]
-
-
-    if values.size == 0:
-
-        return 0.0
-
-
-    return float(
-        np.mean(values < 120)
-    )
-
-
-# ============================================================
-# BUBBLE SCORE WITH ALIGNMENT TOLERANCE
-# ============================================================
-
-def _best_bubble_score(
-    gray,
-    x,
-    y,
-    scale
-):
-
-    radius = max(
-        5,
-        int(round(8 * scale))
-    )
-
-
-    drift = max(
-        1,
-        int(round(4 * scale))
-    )
-
-
-    best = 0.0
-
-
-    for dx in (
-        -drift,
-        0,
-        drift
-    ):
-
-        for dy in (
-            -drift,
-            0,
-            drift
-        ):
-
-            score = _dark_fraction(
-                gray,
-                x + dx,
-                y + dy,
-                radius
-            )
-
-
-            best = max(
-                best,
-                score
-            )
-
-
-    return best
-
-
-# ============================================================
-# MAIN OMR READER
-# ============================================================
-
-def process_image_cv_omr(
-    pil_img,
-    return_diagnostics=False
-):
-
-    responses = {}
-
-
-    diagnostics = {
-
-        "source":
-            "BPSC Page-2 template reader",
-
-        "confidence":
-            {},
-
-        "ambiguous":
-            [],
-
-        "unattempted":
-            [],
-
-        "detected_count":
-            0,
-
-        "quality":
-            0.0
-    }
-
-
-    try:
-
-        rgb = np.array(
-            pil_img.convert("RGB")
-        )
-
-
-        gray = cv2.cvtColor(
-            rgb,
-            cv2.COLOR_RGB2GRAY
-        )
-
-
-        h, w = gray.shape[:2]
-
-
-        sx = (
-            w
-            /
-            OMR_REFERENCE_WIDTH
-        )
-
-
-        sy = (
-            h
-            /
-            OMR_REFERENCE_HEIGHT
-        )
-
-
-        scale = min(
-            sx,
-            sy
-        )
-
-
-        aspect = (
-            w
-            /
-            float(h)
-        )
-
-
-        reference_aspect = (
-            OMR_REFERENCE_WIDTH
-            /
-            OMR_REFERENCE_HEIGHT
-        )
-
-
-        if abs(
-            aspect
-            -
-            reference_aspect
-        ) > 0.08:
-
-            diagnostics["source"] = (
-                "BPSC template reader "
-                "(non-standard page ratio)"
-            )
-
-
-        # ----------------------------------------------------
-        # FIVE BLOCKS
-        # ----------------------------------------------------
-
-        for block_idx in range(5):
-
-            # ------------------------------------------------
-            # TEN QUESTIONS PER BLOCK
-            # ------------------------------------------------
-
-            for row_idx in range(10):
-
-                q_no = (
-                    block_idx * 10
-                    +
-                    row_idx
-                    +
-                    1
-                )
-
-
-                y = (
-                    OMR_ROW_Y[row_idx]
-                    *
-                    sy
-                )
-
-
-                scores = []
-
-
-                # --------------------------------------------
-                # A/B/C/D
-                # --------------------------------------------
-
-                for x_ref in OMR_OPTION_X[block_idx]:
-
-                    x = (
-                        x_ref
-                        *
-                        sx
-                    )
-
-
-                    score = _best_bubble_score(
-                        gray,
-                        x,
-                        y,
-                        scale
-                    )
-
-
-                    scores.append(score)
-
-
-                # --------------------------------------------
-                # FIND HIGHEST SCORE
-                # --------------------------------------------
-
-                order = np.argsort(
-                    scores
-                )[::-1]
-
-
-                best_idx = int(
-                    order[0]
-                )
-
-
-                best = float(
-                    scores[best_idx]
-                )
-
-
-                second = float(
-                    scores[
-                        int(order[1])
-                    ]
-                )
-
-
-                margin = (
-                    best
-                    -
-                    second
-                )
-
-
-                diagnostics[
-                    "confidence"
-                ][q_no] = {
-
-                    "scores":
-                        [
-                            round(v, 3)
-                            for v in scores
-                        ],
-
-                    "best":
-                        round(best, 3),
-
-                    "margin":
-                        round(margin, 3)
-                }
-
-
-                # --------------------------------------------
-                # BLANK QUESTION
-                # --------------------------------------------
-
-                if best < 0.30:
-
-                    diagnostics[
-                        "unattempted"
-                    ].append(q_no)
-
-
-                # --------------------------------------------
-                # MULTIPLE MARKS
-                # --------------------------------------------
-
-                elif (
-                    second >= 0.30
-                    and
-                    (best - second) < 0.18
-                ):
-
-                    diagnostics[
-                        "ambiguous"
-                    ].append(q_no)
-
-
-                # --------------------------------------------
-                # LOW CONFIDENCE
-                # --------------------------------------------
-
-                elif margin < 0.18:
-
-                    diagnostics[
-                        "ambiguous"
-                    ].append(q_no)
-
-
-                # --------------------------------------------
-                # VALID ANSWER
-                # --------------------------------------------
-
-                else:
-
-                    responses[q_no] = (
-                        OPTION_MAP[
-                            best_idx
-                        ]
-                    )
-
-                    diagnostics[
-                        "detected_count"
-                    ] += 1
-
-
-        # ----------------------------------------------------
-        # QUALITY SCORE
-        # ----------------------------------------------------
-
-        if diagnostics[
-            "detected_count"
-        ]:
-
-            conf_values = [
-
-                v["best"]
-
-                for v
-                in diagnostics[
-                    "confidence"
-                ].values()
-
-                if v["best"] >= 0.30
-            ]
-
-
-            diagnostics[
-                "quality"
-            ] = round(
-
-                float(
-                    np.mean(
-                        conf_values
-                    )
-                )
-                if conf_values
-                else 0.0,
-
-                3
-            )
-
-
-    except Exception as exc:
-
-        diagnostics[
-            "error"
-        ] = str(exc)
-
-
-    if return_diagnostics:
-
-        return (
-            responses,
-            diagnostics
-        )
-
-
-    return responses
-
-
-# ============================================================
-# PDF RENDERING
-# ============================================================
-
-def _render_pdf_pages(
-    file_bytes
-):
-    """
-    Render every PDF page at high resolution.
-
-    PyMuPDF is deliberately used first because it works on Streamlit
-    servers without requiring a separate Poppler system package.
-    """
-
-    # --------------------------------------------------------
-    # PRIMARY: PyMuPDF
-    # --------------------------------------------------------
-
-    if fitz is not None:
-
-        try:
-
-            doc = fitz.open(
-                stream=file_bytes,
-                filetype="pdf"
-            )
-
-            pages = []
-
-            # 300 DPI is enough for this BPSC OMR template.
-            zoom = 300.0 / 72.0
-
-            matrix = fitz.Matrix(
-                zoom,
-                zoom
-            )
-
-            for page in doc:
-
-                pix = page.get_pixmap(
-                    matrix=matrix,
-                    alpha=False
-                )
-
-                pages.append(
-                    Image.frombytes(
-                        "RGB",
-                        [
-                            pix.width,
-                            pix.height
-                        ],
-                        pix.samples
-                    )
-                )
-
-            doc.close()
-
-            if pages:
-                return pages
-
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
-    # SECONDARY: pdf2image
-    # --------------------------------------------------------
-
-    if convert_from_bytes is not None:
-
-        try:
-
-            return convert_from_bytes(
-                file_bytes,
-                dpi=300,
-                fmt="png"
-            )
-
-        except Exception:
-            pass
-
-    return []
-
-
-# ============================================================
-# OCR FALLBACK
-# ============================================================
-
-def _extract_text_responses(
-    extracted_text
-):
-
-    responses = {}
-
-
-    if not extracted_text:
-
-        return responses
-
-
-    lines = [
-        line.strip()
-        for line
-        in extracted_text.splitlines()
-        if line.strip()
-    ]
-
-
-    # --------------------------------------------------------
-    # PIPE/TABLE FORMAT
-    # --------------------------------------------------------
-
-    for i in range(
-        len(lines) - 1
-    ):
-
-        q_nums = re.findall(
-
-            r'(?:^|\||\s)'
-            r'(\d{1,2})'
-            r'(?=\s*\||\s*$)',
-
-            lines[i]
-        )
-
-
-        answers = re.findall(
-
-            r'(?:^|\||\s)'
-            r'([A-Da-d])'
-            r'(?=\s*\||\s*$)',
-
-            lines[i + 1]
-        )
-
-
-        if (
-            len(q_nums) >= 2
-            and
-            len(q_nums) == len(answers)
-        ):
-
-            for q_str, ans in zip(
-                q_nums,
-                answers
-            ):
-
-                q_num = int(
-                    q_str
-                )
-
-
-                if 1 <= q_num <= 50:
-
-                    responses[
-                        q_num
-                    ] = ans.upper()
-
-
-    # --------------------------------------------------------
-    # STANDARD FORMAT
-    # --------------------------------------------------------
-
-    if not responses:
-
-        standard_matches = re.findall(
-
-            r'(?:^|\b|\s)'
-            r'(\d{1,2})'
-            r'[\s\.\:\-\|]+'
-            r'([A-Da-d])'
-            r'(?:\b|\s|$)',
-
-            extracted_text
-        )
-
-
-        for q_str, ans in standard_matches:
-
-            q_num = int(
-                q_str
-            )
-
-
-            if 1 <= q_num <= 50:
-
-                responses[
-                    q_num
-                ] = ans.upper()
-
-
-    return responses
-
-
-# ============================================================
-# OMR IDENTITY EXTRACTION
-# ============================================================
-
-
-def _normalize_roll_number(value):
-    """Keep only digits so OCR punctuation/spaces do not break matching."""
-    if not value:
-        return ""
-    return re.sub(r"\D", "", str(value))
-
-
-def _extract_roll_from_bubbles(image):
-    """Read the six-digit roll number from the OMR bubble grid.
-
-    The sample sheets have a six-column x ten-row roll grid.  This deliberately
-    ignores the printed 'OMR Sheet No.' because that number changes from paper
-    to paper for the same candidate.
-    """
-    if image is None:
-        return ""
-
-    rgb = np.array(image.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    h, w = gray.shape[:2]
-
-    # Relative positions measured from the supplied OMR template.
-    x0 = 0.1635 * w
-    dx = 0.0380 * w
-    y0 = 0.1735 * h
-    dy = 0.0103 * h
-
-    digits = []
-    confidence = []
-
-    for col in range(6):
-        x = x0 + col * dx
-        scores = []
-        for row in range(10):
-            y = y0 + row * dy
-            cx, cy = int(round(x)), int(round(y))
-            radius = max(5, int(round(0.006 * min(w, h))))
-            patch = gray[
-                max(0, cy - radius):min(h, cy + radius + 1),
-                max(0, cx - radius):min(w, cx + radius + 1),
-            ]
-            if patch.size == 0:
-                scores.append(0)
-                continue
-            # Filled bubbles contain substantially more dark pixels than the
-            # outlined bubbles and their printed row numbers.
-            scores.append(int(np.sum(patch < 100)))
-
-        order = np.argsort(scores)[::-1]
-        best = int(order[0])
-        best_score = scores[best]
-        second_score = scores[int(order[1])] if len(order) > 1 else 0
-        digits.append(str(best))
-        confidence.append((best_score, second_score))
-
-    # Filled circles in this template are normally ~60-90 dark pixels in the
-    # sampling patch, while empty circles are far lower.
-    if not all(best >= 25 and best >= second + 15 for best, second in confidence):
-        return ""
-
-    return "".join(digits)
-
-
-def _normalize_booklet_set(value):
-    """Normalize the Question Booklet Series for exact OMR/key matching.
-
-    Examples:
-      ``J`` -> ``SET-J``
-      ``Set-J`` -> ``SET-J``
-      ``Set-J (Set-2)`` -> ``SET-J``
-
-    The first explicit ``Set-<letter>`` is the booklet series.  Numeric
-    values in parentheses are internal answer-key identifiers and are not
-    used for booklet matching.
-    """
-    text = str(value or "").strip().upper()
-    if not text:
-        return ""
-
-    match = re.search(r"\bSET\s*[-:]?\s*([A-Z])\b", text)
-    if match:
-        return f"SET-{match.group(1)}"
-
-    match = re.search(r"\bBOOKLET\s*SERIES\s*[-:]?\s*([A-Z])\b", text)
-    if match:
-        return f"SET-{match.group(1)}"
-
-    if re.fullmatch(r"[A-Z]", text):
-        return f"SET-{text}"
-
-    # Last-resort single-letter extraction, never a numeric set number.
-    letters = re.findall(r"\b([A-Z])\b", text)
-    if letters:
-        return f"SET-{letters[0]}"
-
-    return ""
-
-
-def _booklet_letters_from_valid_sets(valid_sets):
-    """Return the actual booklet letters allowed by an answer-key list."""
-    letters = set()
-    for item in (valid_sets or []):
-        normalized = _normalize_booklet_set(item)
-        match = re.fullmatch(r"SET-([A-Z])", normalized)
-        if match:
-            letters.add(match.group(1))
-    return letters or set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-
-def _extract_booklet_set(image, valid_sets=None):
-    """Detect the large printed Question Booklet Series letter.
-
-    The BPSC sheet has a large single letter (J/F/B/etc.) in the centre-top
-    booklet box.  The detector deliberately uses the rendered page itself,
-    rather than OCR of the whole page.  This is important because the PDF
-    renderer used by Streamlit can have a different resolution from an
-    exported PNG, and the old narrow crop could then miss the letter.
-    """
-    if image is None or pytesseract is None:
-        return ""
-
-    valid_letters = _booklet_letters_from_valid_sets(valid_sets)
-    rgb = image.convert("RGB")
-    w, h = rgb.size
-
-    # Use a deliberately generous region around the booklet box.  It covers
-    # the actual large letter on both the uploaded PNG and the PyMuPDF PDF
-    # rendering used by the app, while excluding the candidate/roll fields.
-    boxes = [
-        (0.445, 0.175, 0.655, 0.335),
-        (0.465, 0.195, 0.645, 0.325),
-        (0.475, 0.205, 0.635, 0.320),
-    ]
-
-    candidates = []
-    for left, top, right, bottom in boxes:
-        crop = rgb.crop((
-            int(left * w), int(top * h),
-            int(right * w), int(bottom * h),
-        ))
-        crop = crop.resize(
-            (max(900, crop.width * 4), max(700, crop.height * 4)),
-            Image.Resampling.LANCZOS,
-        )
-
-        arr = np.array(crop)
-        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-
-        # The booklet letter is black, while the template/watermark is much
-        # lighter.  Low thresholds isolate the large printed letter reliably.
-        variants = [
-            cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY)[1],
-            cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY)[1],
-            cv2.threshold(gray, 90, 255, cv2.THRESH_BINARY)[1],
-            cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY)[1],
-            cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-        ]
-
-        for variant in variants:
-            for psm in (6, 7, 10, 13):
-                try:
-                    text = pytesseract.image_to_string(
-                        Image.fromarray(variant),
-                        config=(
-                            f"--psm {psm} "
-                            f"-c tessedit_char_whitelist={''.join(sorted(valid_letters))}"
-                        ),
-                    ).upper()
-                except Exception:
-                    continue
-
-                for token in re.findall(r"[A-Z]", text):
-                    if token in valid_letters:
-                        candidates.append(token)
-
-    if not candidates:
-        return ""
-
-    counts = Counter(candidates)
-    best, best_count = counts.most_common(1)[0]
-    second_count = counts.most_common(2)[1][1] if len(counts) > 1 else 0
-
-    # Require repeated evidence, but do not require a huge margin because
-    # some threshold variants can produce harmless stray letters.
-    if best_count < 2 or best_count < second_count + 1:
-        return ""
-
-    return best
-
-
-def extract_omr_identity(uploaded_file, valid_sets=None):
-    """Extract only the bubbled roll number and booklet set from an OMR file.
-
-    Candidate name is intentionally NOT detected or stored.  The roll number
-    is used only as the private six-sheet identity key; public output uses a
-    separate random anonymous ID.
-    """
-    if uploaded_file is None:
-        return {"roll_no": "", "booklet_set": "", "raw_ocr": ""}
-
-    file_bytes = uploaded_file.getvalue()
-    file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
-    images = []
-    extracted_text = ""
-
-    try:
-        if file_ext in ["jpg", "jpeg", "png"]:
-            images = [Image.open(io.BytesIO(file_bytes)).convert("RGB")]
-
-        elif file_ext == "pdf":
-            if pdfplumber is not None:
-                try:
-                    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                        for page in pdf.pages:
-                            page_text = page.extract_text()
-                            if page_text:
-                                extracted_text += page_text + "\n"
-                except Exception:
-                    extracted_text = ""
-
-            images = _render_pdf_pages(file_bytes)
-
-        if not images:
-            return {"roll_no": "", "booklet_set": "", "raw_ocr": extracted_text}
-
-        # Only the first OMR page is used for the identity fields.
-        # The printed OMR Sheet No. is deliberately ignored.
-        first_image = images[0]
-        detected_roll = _extract_roll_from_bubbles(first_image)
-        detected_booklet_set = _extract_booklet_set(
-            first_image,
-            valid_sets=valid_sets,
-        )
-
-        return {
-            "roll_no": detected_roll,
-            "booklet_set": detected_booklet_set,
-            "raw_ocr": extracted_text,
-        }
-
-    except Exception as exc:
-        return {
-            "roll_no": "",
-            "booklet_set": "",
-            "raw_ocr": f"OMR ID ERROR: {exc}",
-        }
-
-
-# ============================================================
-# MAIN FILE PARSER
-# ============================================================
-
-def parse_omr_file(
-    uploaded_file
-):
-
-    if uploaded_file is None:
-
-        return {}
-
-
-    file_bytes = (
-        uploaded_file.getvalue()
-    )
-
-
-    file_ext = (
-        uploaded_file.name
-        .rsplit(".", 1)[-1]
-        .lower()
-    )
-
-
-    pil_images = []
-
-    extracted_text = ""
-
-
-    try:
-
-        # ----------------------------------------------------
-        # IMAGE FILE
-        # ----------------------------------------------------
-
-        if file_ext in [
-            "jpg",
-            "jpeg",
-            "png"
-        ]:
-
-            pil_images = [
-
-                Image.open(
-                    io.BytesIO(
-                        file_bytes
-                    )
-                ).convert("RGB")
-
-            ]
-
-
-            if pytesseract is not None:
-
-                try:
-
-                    extracted_text = (
-                        pytesseract
-                        .image_to_string(
-                            pil_images[0]
-                        )
-                    )
-
-                except Exception:
-
-                    extracted_text = ""
-
-
-        # ----------------------------------------------------
-        # PDF FILE
-        # ----------------------------------------------------
-
-        elif file_ext == "pdf":
-
-            # -----------------------------------------------
-            # PDF TEXT EXTRACTION
-            # -----------------------------------------------
-
-            if pdfplumber is not None:
-
-                try:
-
-                    with pdfplumber.open(
-                        io.BytesIO(
-                            file_bytes
-                        )
-                    ) as pdf:
-
-                        for page in pdf.pages:
-
-                            text = (
-                                page.extract_text()
-                            )
-
-
-                            if text:
-
-                                extracted_text += (
-                                    text
-                                    +
-                                    "\n"
-                                )
-
-                except Exception:
-
-                    extracted_text = ""
-
-
-            # -----------------------------------------------
-            # RENDER PDF
-            # -----------------------------------------------
-
-            pil_images = _render_pdf_pages(
-                file_bytes
-            )
-
-
-            if not pil_images:
-
-                st.error(
-                    f"❌ PDF rendering failed for "
-                    f"`{uploaded_file.name}`. "
-                    "The server needs PyMuPDF (fitz). "
-                    "Check that `PyMuPDF` is present in requirements.txt."
-                )
-
-                return {}
-
-
-            # -----------------------------------------------
-            # OCR
-            # -----------------------------------------------
-
-            if (
-                pil_images
-                and
-                pytesseract is not None
-                and
-                not extracted_text.strip()
-            ):
-
-                try:
-
-                    extracted_text = (
-                        pytesseract
-                        .image_to_string(
-                            pil_images[0]
-                        )
-                    )
-
-                except Exception:
-
-                    extracted_text = ""
-
-
-        # ====================================================
-        # PRIMARY OMR READER
-        # ====================================================
-
-        if pil_images:
-
-            best_responses = {}
-            best_diag = None
-
-            # Test every rendered page and keep the page with
-            # the highest number of confidently detected answers.
-            for page_index, page_image in enumerate(pil_images):
-
-                page_responses, page_diag = (
-                    process_image_cv_omr(
-                        page_image,
-                        return_diagnostics=True
-                    )
-                )
-
-                if (
-                    best_diag is None
-                    or
-                    page_diag.get("detected_count", 0)
-                    >
-                    best_diag.get("detected_count", 0)
-                ):
-                    best_responses = page_responses
-                    best_diag = page_diag
-
-            if best_diag is not None:
-
-                detected = best_diag.get(
-                    "detected_count",
-                    0
-                )
-
-                ambiguous = best_diag.get(
-                    "ambiguous",
-                    []
-                )
-
-                unattempted = best_diag.get(
-                    "unattempted",
-                    []
-                )
-
-                # ------------------------------------------------
-                # SUCCESSFUL OMR READ
-                # ------------------------------------------------
-
-                if detected >= 40:
-
-                    if ambiguous:
-
-                        st.warning(
-                            "⚠️ OMR reader found ambiguous "
-                            "marks in "
-                            +
-                            ", ".join(
-                                f"Q{q}"
-                                for q in ambiguous
-                            )
-                            +
-                            ". These questions were not guessed."
-                        )
-
-                    if unattempted:
-
-                        st.info(
-                            "ℹ️ Blank/unattempted questions: "
-                            +
-                            ", ".join(
-                                f"Q{q}"
-                                for q in unattempted
-                            )
-                        )
-
-                    st.success(
-                        f"✅ OMR vision read completed: "
-                        f"{detected}/50 responses detected."
-                    )
-
-                    # Visible diagnostic table so the reader can
-                    # be verified before scoring.
-                    detected_rows = []
-
-                    for q_no in range(1, 51):
-
-                        detected_rows.append({
-                            "Q": q_no,
-                            "Detected Answer":
-                                best_responses.get(
-                                    q_no,
-                                    "Unattempted"
-                                ),
-                            "Confidence":
-                                best_diag.get(
-                                    "confidence",
-                                    {}
-                                ).get(
-                                    q_no,
-                                    {}
-                                ).get(
-                                    "best",
-                                    0.0
-                                )
-                        })
-
-                    with st.expander(
-                        "🔎 Verify detected OMR answers before scoring",
-                        expanded=False
-                    ):
-
-                        st.dataframe(
-                            pd.DataFrame(
-                                detected_rows
-                            ),
-                            hide_index=True,
-                            use_container_width=True
-                        )
-
-                    return best_responses
-
-                # ------------------------------------------------
-                # LOW DETECTION
-                # ------------------------------------------------
-
-                st.warning(
-                    f"⚠️ BPSC OMR reader detected only "
-                    f"{detected}/50 responses. "
-                    "The score will NOT silently treat the "
-                    "whole sheet as blank."
-                )
-
-                # Do not fall through to a bad legacy result
-                # when the actual OMR image was successfully read.
-                if detected == 0:
-                    st.error(
-                        "❌ No OMR bubbles were detected. "
-                        "Check PDF rendering/template alignment."
-                    )
-                    return {}
-
-        # ====================================================
-        # OCR FALLBACK
-        # ====================================================
-
-        responses = _extract_text_responses(
-            extracted_text
-        )
-
-
-        if responses:
-
-            st.info(
-
-                f"ℹ️ Used text/OCR fallback: "
-                f"{len(responses)} responses extracted."
-            )
-
-
-            return responses
-
-
-        # ====================================================
-        # LEGACY FALLBACK
-        # ====================================================
-
-        if pil_images:
-
-            responses = _legacy_contour_omr(
-                pil_images[0]
-            )
-
-
-            if responses:
-
-                st.info(
-
-                    f"ℹ️ Used contour fallback: "
-                    f"{len(responses)} responses extracted."
-                )
-
-
-            return responses
-
-
-    except Exception as e:
-
-        st.error(
-
-            f"Error reading "
-            f"{uploaded_file.name}: "
-            f"{str(e)}"
-        )
-
-
-    return {}
-
-
-# ============================================================
-# GENERIC CONTOUR FALLBACK
-# ============================================================
-
-def _legacy_contour_omr(
-    pil_img
-):
-
-    responses = {}
-
-
-    try:
-
-        image = np.array(
-            pil_img.convert("RGB")
-        )
-
-
-        gray = cv2.cvtColor(
-            image,
-            cv2.COLOR_RGB2GRAY
-        )
-
-
-        blur = cv2.GaussianBlur(
-            gray,
-            (5, 5),
-            0
-        )
-
-
-        thresh = cv2.threshold(
-            blur,
-            0,
-            255,
-            cv2.THRESH_BINARY_INV
-            +
-            cv2.THRESH_OTSU
-        )[1]
-
-
-        contours, _ = cv2.findContours(
-            thresh,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-
-        bubbles = []
-
-
-        for c in contours:
-
-            x, y, w, h = (
-                cv2.boundingRect(c)
-            )
-
-
-            if (
-                10 <= w <= 70
-                and
-                10 <= h <= 70
-            ):
-
-                ar = (
-                    w
-                    /
-                    float(h)
-                )
-
-
-                if (
-                    0.70 <= ar <= 1.30
-                ):
-
-                    bubbles.append(
-                        (
-                            x,
-                            y,
-                            w,
-                            h
-                        )
-                    )
-
-
-        bubbles.sort(
-            key=lambda b: (
-                b[1],
-                b[0]
-            )
-        )
-
-
-        for q in range(
-            1,
-            51
-        ):
-
-            group = bubbles[
-                (q - 1) * 4:
-                q * 4
-            ]
-
-
-            if len(group) != 4:
-
-                continue
-
-
-            scores = []
-
-
-            for x, y, w, h in group:
-
-                roi = thresh[
-                    y:y+h,
-                    x:x+w
-                ]
-
-
-                scores.append(
-
-                    cv2.countNonZero(
-                        roi
-                    )
-                    /
-                    float(
-                        max(
-                            1,
-                            roi.size
-                        )
-                    )
-                )
-
-
-            idx = int(
-                np.argmax(scores)
-            )
-
-
-            if scores[idx] > 0.20:
-
-                responses[q] = (
-                    OPTION_MAP[idx]
-                )
-
-
-    except Exception:
-
-        return {}
-
-
-    return responses
-
-
-# ============================================================
-# EVALUATION
-# ============================================================
-
-def evaluate_paper(
-    student_responses,
-    official_key
-):
-
-    engine = OMREvaluationEngine(
-        official_key
-    )
-
-    return engine.evaluate_responses(
-        student_responses
-    )
 
 
 # ============================================================
 # MARKSHEET DISPLAY
 # ============================================================
 
-def render_marksheet(
-    record,
-    total_candidates
-):
-
-    st.markdown("---")
-
-
-    st.subheader(
-        f"📄 BPSC Official Scorecard: Anonymous ID {record.get('public_id', 'N/A')}"
+def render_marksheet(record, total_candidates):
+    """Privacy-minimal student result: Anonymous ID + current rank only."""
+    st.markdown(
+        """
+        <div class="secure-card">
+            <div class="secure-badge">🔒 PRIVATE RESULT VIEW</div>
+            <div class="result-label">Anonymous ID</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-
-
-    if record["qualified"]:
-
-        st.success(
-
-            "🎉 STATUS: QUALIFIED "
-            "(Passed English & Hindi "
-            "Qualifying Cutoff >= 30%)"
-        )
-
-    else:
-
-        st.error(
-
-            "❌ STATUS: DISQUALIFIED "
-            "(Failed English or Hindi "
-            "Qualifying Cutoff of 30%)"
-        )
-
-
-    m1, m2, m3, m4 = st.columns(4)
-
-
-    m1.metric(
-
-        "Overall Rank",
-
-        f"#{record.get('rank', 'N/A')} "
-        f"/ {total_candidates}"
+    st.markdown(
+        f"<div class='anon-id'>{record.get('public_id', 'N/A')}</div>",
+        unsafe_allow_html=True,
     )
-
-
-    m2.metric(
-
-        "Merit Score (P3-P6)",
-
-        f"{record['merit_total']} "
-        f"/ {record['merit_max']}"
+    st.metric(
+        "Current Rank",
+        f"#{record.get('rank', 'N/A')}",
     )
-
-
-    m3.metric(
-
-        "Merit Percentage",
-
-        f"{record['merit_pct']}%"
-    )
-
-
-    m4.metric(
-
-        "Qualifying Status",
-
-        "Passed"
-        if record["qualified"]
-        else
-        "Failed"
-    )
-
-
-    # ========================================================
-    # SUBJECT TABLE
-    # ========================================================
-
-    st.write(
-        "### 📊 Subject-wise Scorecard Breakdown"
-    )
-
-
-    table_data = []
-
-
-    for code, p in record["papers"].items():
-
-        status = (
-            "Pass"
-            if p["passed"]
-            else
-            "Fail"
-        )
-
-
-        if p["type"] == "merit":
-
-            status = "Merit Subject"
-
-
-        table_data.append({
-
-            "Paper Code":
-                code,
-
-            "Subject Name":
-                p["subject_name"],
-
-            "Selected OMR Set":
-                p["set_name"],
-
-            "Correct (+2)":
-                p["correct"],
-
-            "Wrong (0)":
-                p["wrong"],
-
-            "Unattempted":
-                p["skipped"],
-
-            "Deleted Questions":
-                f"{p['deleted_count']} Qs "
-                f"(+{p['bonus_marks']} Bonus)",
-
-            "Total Score":
-                f"{p['score']} / "
-                f"{p['max_marks']}",
-
-            "Percentage":
-                f"{p['pct']}%",
-
-            "Status":
-                status
-        })
-
-
-    st.dataframe(
-
-        pd.DataFrame(
-            table_data
-        ),
-
-        hide_index=True,
-
-        use_container_width=True
-    )
-
-
-    # ========================================================
-    # QUESTION-BY-QUESTION AUDIT
-    # ========================================================
-
-    st.write(
-        "### 🔍 Detailed Question-by-Question Response Audit"
-    )
-
-
-    for code, p in record["papers"].items():
-
-        with st.expander(
-
-            f"Inspect Responses for "
-            f"{code}: "
-            f"{p['subject_name']} "
-            f"({p['set_name']})",
-
-            expanded=False
-        ):
-
-            df_itemized = pd.DataFrame(
-                p["itemized_breakdown"]
-            )
-
-
-            st.dataframe(
-
-                df_itemized,
-
-                hide_index=True,
-
-                use_container_width=True
-            )
-
-
-    # ========================================================
-    # SHAREABLE LINK
-    # ========================================================
-
-    st.write(
-        "### 🔗 Shareable Direct Scorecard Link"
-    )
-
-
-    base_url = st.query_params.get(
-        "base_url",
-        "http://localhost:8501"
-    )
-
-
-    direct_link = (
-        f"{base_url}"
-        f"?public_id="
-        f"{record.get('public_id', '')}"
-    )
-
-
-    st.code(
-        direct_link,
-        language="text"
+    st.caption(
+        "Only your current rank is displayed. Marks, OMR responses, "
+        "answer keys and question-level details are not displayed."
     )
 
 
@@ -2383,17 +797,57 @@ def render_marksheet(
 st.set_page_config(
 
     page_title=
-        "BPSC OMR Evaluator & Merit Leaderboard",
+        "BPSC Merit Rank Portal",
 
     layout="wide",
 
-    page_icon="📝"
+    page_icon="🔒"
 )
 
 
 st.title(
     "📝 BPSC Student OMR "
-    "Marksheet Generator & Merit Portal"
+    "Merit Rank Portal"
+)
+
+st.markdown(
+    """
+    <style>
+    .main .block-container {max-width: 1180px; padding-top: 2rem;}
+    .secure-card {
+        border: 1px solid rgba(49, 51, 63, .18);
+        border-radius: 18px;
+        padding: 18px 20px 8px 20px;
+        background: rgba(250, 250, 252, .72);
+        margin-bottom: 8px;
+    }
+    .secure-badge {
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 999px;
+        font-size: .78rem;
+        font-weight: 700;
+        letter-spacing: .04em;
+    }
+    .result-label {font-size: .9rem; opacity: .72; margin-top: 12px;}
+    .anon-id {font-size: 2rem; font-weight: 800; letter-spacing: .08em;
+              margin: 0 0 12px 0;}
+    .privacy-note {
+        border-left: 4px solid #888;
+        padding: 12px 16px;
+        border-radius: 8px;
+        background: rgba(128,128,128,.08);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="privacy-note">🔒 <b>Privacy-first processing:</b> '
+    'OMR files are processed in memory and are not written to the ranking database. '
+    'The persistent database is encrypted and contains only the minimum fields '
+    'needed for ranking.</div>',
+    unsafe_allow_html=True,
 )
 
 
@@ -2414,9 +868,9 @@ tabs = st.tabs([
 
     "📤 Student OMR Portal",
 
-    "🔍 Direct Scorecard Lookup",
+    "🔍 Rank Lookup",
 
-    "🏆 Live Merit Leaderboard"
+    "🏆 Merit Rank List"
 ])
 
 
@@ -2570,6 +1024,26 @@ with tabs[0]:
             )
             st.stop()
 
+        # Privacy control: reject unusually large uploads before processing.
+        oversized = []
+        for code, uploaded in omr_files.items():
+            if uploaded is not None:
+                try:
+                    size_mb = uploaded.size / (1024 * 1024)
+                    if size_mb > MAX_UPLOAD_MB:
+                        oversized.append(
+                            f"{code}: {size_mb:.1f} MB (limit {MAX_UPLOAD_MB} MB)"
+                        )
+                except Exception:
+                    pass
+
+        if oversized:
+            st.error("Upload rejected because one or more files exceed the privacy/safety size limit.")
+            st.write("\n".join(f"- {item}" for item in oversized))
+            st.stop()
+
+        # UploadedFile objects are processed in memory only. This application
+        # never writes the original OMR bytes to the ranking database.
         # =================================================
         # HARD GATE: SAME STUDENT ACROSS ALL SIX SUBJECT SHEETS
         # =================================================
@@ -2585,25 +1059,16 @@ with tabs[0]:
                 omr_files[code]
             )
 
-        normalized_rolls = {}
-        identity_rows = []
+        normalized_rolls = {
+            code: _normalize_roll_number(identity.get("roll_no", ""))
+            for code, identity in identity_results.items()
+        }
 
-        for code, identity in identity_results.items():
-            normalized_rolls[code] = _normalize_roll_number(
-                identity.get("roll_no", "")
-            )
-            identity_rows.append({
-                "Paper": code,
-                "Roll number detected from OMR": identity.get("roll_no") or "NOT DETECTED",
-                "Booklet manually selected": omr_sets[code],
-                "Booklet manually confirmed": "YES" if booklet_confirmed[code] else "NO",
-            })
-
-        st.write("### 🔎 OMR Roll Number Verification")
-        st.dataframe(
-            pd.DataFrame(identity_rows),
-            hide_index=True,
-            use_container_width=True,
+        # Do not display the detected roll number back to the browser/UI.
+        # Only show a privacy-safe verification status.
+        st.success(
+            "🔐 Identity verification completed across all six OMR sheets. "
+            "The detected roll number is not displayed."
         )
 
         roll_values = list(normalized_rolls.values())
@@ -2814,142 +1279,85 @@ with tabs[0]:
         # =================================================
         # DATABASE
         # =================================================
+        # IMPORTANT PRIVACY RULE:
+        # The persistent database stores ONLY:
+        #   - private roll number (identity key)
+        #   - anonymous public ID
+        #   - merit marks
+        #   - maximum merit marks
+        #
+        # OMR responses, answer keys, question-by-question results,
+        # English/Hindi marks, correct/wrong counts, and other paper details
+        # are NOT stored in the database.
 
         db = load_data()
 
+        normalized_roll_no = str(roll_no).strip()
 
-        # Remove previous result for same roll number.
-
-        db = [
-
-            item
-
-            for item in db
-
-            if str(
-                item["roll_no"]
-            ).strip()
-            !=
-            str(
-                roll_no
-            ).strip()
-        ]
-
-
-        new_entry = {
-
-            # No candidate name is detected or stored from the OMR.
-            # The real roll number is retained only as a private identity key.
-            "roll_no":
-                roll_no,
-
-            # Public anonymous identifier. The actual roll number is
-            # retained only for private identity verification/lookup.
-            "public_id":
-                generate_unique_public_id(db),
-
-            "papers":
-                paper_results,
-
-            "merit_total":
-                merit_total,
-
-            "merit_max":
-                merit_max,
-
-            "merit_pct":
-                merit_pct,
-
-            "qualified":
-                is_qualified,
-
-            # This record was created only after all six subject response
-            # sheets supplied the same verified bubbled roll number.
-            "identity_verified":
-                True
-        }
-
-
-        db.append(
-            new_entry
+        # If this roll number already exists, update that record instead of
+        # creating another historical record. Keep the existing Anonymous ID.
+        existing = next(
+            (
+                item for item in db
+                if str(item.get("roll_no", "")).strip() == normalized_roll_no
+            ),
+            None
         )
 
+        if existing:
+            public_id = str(
+                existing.get("public_id") or generate_unique_public_id(db)
+            )
+        else:
+            public_id = generate_unique_public_id(db)
 
-        # =================================================
-        # RANKING
-        # =================================================
+        new_entry = {
+            "roll_no": normalized_roll_no,
+            "public_id": public_id,
+            "merit_total": round(merit_total, 2),
+            "merit_max": round(merit_max, 2),
+        }
 
-        # Only records verified from all six OMR sheets can appear
-        # in the new merit ranking. Legacy/manual records are not ranked.
-        verified_records = [
-            item
-            for item in db
-            if item.get("identity_verified", False) is True
+        # Remove any old record for this roll number, then save only the
+        # current result.
+        db = [
+            item for item in db
+            if str(item.get("roll_no", "")).strip() != normalized_roll_no
         ]
+        db.append(new_entry)
 
-        unverified_records = [
-            item
-            for item in db
-            if item.get("identity_verified", False) is not True
-        ]
-
-        verified_records.sort(
-
-            key=lambda x: (
-
-                x["qualified"],
-
-                x["merit_total"]
-
-            ),
-
+        # Current merit ranking: highest merit marks = rank 1.
+        # Recalculate every rank after each new/update submission.
+        db.sort(
+            key=lambda x: float(x.get("merit_total", 0)),
             reverse=True
         )
 
+        for rank_idx, record in enumerate(db, start=1):
+            record["rank"] = rank_idx
 
-        for rank_idx, record in enumerate(
-
-            verified_records,
-
-            start=1
-        ):
-
-            record["rank"] = (
-                rank_idx
-            )
-
-        # Explicitly remove stale ranks from legacy records.
-        for record in unverified_records:
-            record.pop("rank", None)
-
-        db = verified_records + unverified_records
-
-
+        # save_data() strips the transient rank and any unexpected fields.
         save_data(db)
-
 
         st.balloons()
 
-
         saved_record = next(
-            item
-            for item in db
-            if str(item.get("public_id", "")) == str(new_entry.get("public_id", ""))
-        )
-
-
-        verified_count = sum(
-            1
-            for item in db
-            if item.get("identity_verified", False) is True
+            item for item in db
+            if str(item.get("public_id", "")) == public_id
         )
 
         render_marksheet(
-
             saved_record,
-
-            verified_count
+            len(db)
         )
+
+        # Best-effort cleanup of transient OMR/evaluation objects from this
+        # Streamlit session after the result has been rendered.
+        # No OMR image/response data is placed into persistent storage.
+        del paper_results
+        del identity_results
+        del normalized_rolls
+
 
 # ============================================================
 # TAB 2
@@ -2958,9 +1366,8 @@ with tabs[0]:
 with tabs[1]:
 
     st.subheader(
-        "🔍 Search Candidate Scorecard"
+        "🔍 Find Your Current Rank"
     )
-
 
     search_public_id = st.text_input(
         "Enter Anonymous ID:",
@@ -2968,58 +1375,38 @@ with tabs[1]:
         placeholder="e.g. 583214"
     )
 
-
     if search_public_id.strip():
 
         db = load_data()
-        ids_changed = ensure_public_ids(db)
-        if ids_changed:
-            save_data(db)
 
-        verified_count = sum(
-            1
-            for item in db
-            if item.get("identity_verified", False) is True
+        # Recalculate ranks from the current stored merit marks so the
+        # displayed rank is always the current rank.
+        db.sort(
+            key=lambda x: float(x.get("merit_total", 0)),
+            reverse=True
         )
 
+        for rank_idx, item in enumerate(db, start=1):
+            item["rank"] = rank_idx
+
+        save_data(db)
 
         record = next(
-
             (
-
-                item
-
-                for item in db
-
-                if str(
-                    item.get("public_id", "")
-                ).strip().lower()
-                ==
-                str(
-                    search_public_id
-                ).strip().lower()
+                item for item in db
+                if str(item.get("public_id", "")).strip().lower()
+                == str(search_public_id).strip().lower()
             ),
-
             None
         )
 
-
         if record:
-
-            render_marksheet(
-
-                record,
-
-                verified_count
-            )
-
-
+            # Student sees ONLY the current rank.
+            render_marksheet(record, len(db))
         else:
-
             st.error(
-                f"No marksheets found for Anonymous ID: `{search_public_id}`"
+                f"No record found for Anonymous ID: `{search_public_id}`"
             )
-
 
 # ============================================================
 # TAB 3
@@ -3028,106 +1415,46 @@ with tabs[1]:
 with tabs[2]:
 
     st.subheader(
-        "🏆 Official Live Merit Leaderboard"
+        "🏆 Live Merit Rank List"
+    )
+    st.caption(
+        "Public view contains only Rank, Anonymous ID and Merit Marks. "
+        "No roll numbers or OMR details are published."
     )
 
-
     all_db = load_data()
-    ids_changed = ensure_public_ids(all_db)
-    if ids_changed:
+
+    if not all_db:
+        st.info(
+            "No merit records have been published yet."
+        )
+    else:
+        # Current rank is always calculated from current merit marks.
+        all_db.sort(
+            key=lambda x: float(x.get("merit_total", 0)),
+            reverse=True
+        )
+
+        for rank_idx, item in enumerate(all_db, start=1):
+            item["rank"] = rank_idx
+
         save_data(all_db)
 
-    db = [
-        item
-        for item in all_db
-        if item.get("identity_verified", False) is True
-    ]
-
-
-    if not db:
-
-        st.info(
-
-            "No candidates with six matching, identity-verified OMR sheets "
-            "have been published yet."
-        )
-
-
-    else:
-
-        rows = []
-
-
-        for item in db:
-
-            p1 = item[
-                "papers"
-            ]["P1"]
-
-
-            p2 = item[
-                "papers"
-            ]["P2"]
-
-
-            rows.append({
-
-                "Rank":
-                    item.get(
-                        "rank",
-                        "N/A"
-                    ),
-
-                # Candidate name is intentionally not published.
-                # Never expose the real OMR roll number in the public
-                # leaderboard. This random ID is unique across all
-                # published records and is not derived from the roll number.
-                "Anonymous ID":
-                    item.get("public_id", "N/A"),
-
-                "Status":
-                    (
-                        "Qualified"
-                        if item["qualified"]
-                        else
-                        "Disqualified"
-                    ),
-
-                "English (P1) Marks":
-                    (
-                        f"{p1['score']} "
-                        f"("
-                        f"{'Pass' if p1['passed'] else 'Fail'}"
-                        f")"
-                    ),
-
-                "Hindi (P2) Marks":
-                    (
-                        f"{p2['score']} "
-                        f"("
-                        f"{'Pass' if p2['passed'] else 'Fail'}"
-                        f")"
-                    ),
-
-                "Merit Total (P3-P6)":
-                    (
-                        f"{item['merit_total']} "
-                        f"/ "
-                        f"{item['merit_max']}"
-                    ),
-
-                "Merit Percentage":
-                    (
-                        f"{item['merit_pct']}%"
-                    )
-            })
-
+        rows = [
+            {
+                "Rank": item.get("rank", "N/A"),
+                "Anonymous ID": item.get("public_id", "N/A"),
+                "Merit Marks": (
+                    f"{item.get('merit_total', 0)} / "
+                    f"{item.get('merit_max', 0)}"
+                ),
+            }
+            for item in all_db
+        ]
 
         st.dataframe(
-
             pd.DataFrame(rows),
-
             hide_index=True,
-
             use_container_width=True
         )
+
