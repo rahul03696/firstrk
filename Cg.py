@@ -809,10 +809,10 @@ st.markdown(
     """
     <div class="app-header">
         <div class="brand-row">
-            <div class="brand-mark">OMR</div>
+            <div class="brand-mark">BPSC<br><span>AE</span></div>
             <div>
-                <div class="brand-title">OMR Marksheet Portal</div>
-                <div class="brand-subtitle">Secure • Simple • Transparent evaluation</div>
+                <div class="brand-title">BPSC-AE Rank List</div>
+                <div class="brand-subtitle">OMR Marks & Merit Ranking Portal</div>
             </div>
         </div>
         <div class="header-badge">🔒 Secure processing</div>
@@ -824,40 +824,36 @@ st.markdown(
 st.markdown(
     """
     <style>
-    .main .block-container {max-width: 1120px; padding-top: 1.25rem; padding-bottom: 3rem;}
-    .app-header {display:flex; justify-content:space-between; align-items:center; gap:16px; padding:18px 22px; border:1px solid #e5e7eb; border-radius:18px; background:#fff; box-shadow:0 4px 18px rgba(15,23,42,.05); margin-bottom:22px;}
-    .brand-row {display:flex; align-items:center; gap:13px;}
-    .brand-mark {width:48px; height:48px; border-radius:13px; display:flex; align-items:center; justify-content:center; background:#173f67; color:#fff; font-weight:800; font-size:.78rem; letter-spacing:.05em;}
-    .brand-title {font-size:1.18rem; font-weight:800; color:#172033; line-height:1.2;}
-    .brand-subtitle {font-size:.82rem; color:#64748b; margin-top:3px;}
-    .header-badge {border:1px solid #dbe4ee; background:#f8fafc; color:#334155; border-radius:999px; padding:7px 11px; font-size:.78rem; font-weight:700; white-space:nowrap;}
-    .upload-hero {border:1px solid #d8e2ec; border-radius:22px; padding:26px; background:linear-gradient(145deg,#f8fbff,#ffffff); box-shadow:0 8px 28px rgba(15,23,42,.06); margin-bottom:18px;}
-    .upload-kicker {font-size:.76rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#25618d; margin-bottom:7px;}
-    .upload-title {font-size:2rem; font-weight:850; color:#172033; margin:0 0 7px 0;}
-    .upload-subtitle {font-size:1rem; color:#526174; line-height:1.55; max-width:760px; margin:0;}
-    .step-grid {display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:20px;}
-    .step-card {border:1px solid #e2e8f0; border-radius:14px; padding:13px 14px; background:#fff;}
-    .step-number {font-size:.72rem; font-weight:800; color:#25618d; text-transform:uppercase; letter-spacing:.06em;}
-    .step-text {font-size:.88rem; font-weight:650; color:#253247; margin-top:4px;}
-    .privacy-hero {border:1px solid #e2e8f0; border-radius:18px; padding:20px 22px; margin:26px 0 12px 0; background:#f8fafc;}
-    .privacy-hero h2 {margin:0; font-size:1.25rem; color:#172033;}
-    .privacy-lead {margin:6px 0 0 0; color:#59677a; line-height:1.5; font-size:.9rem;}
-    .privacy-grid {display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-bottom:14px;}
-    .privacy-box {border:1px solid #e2e8f0; border-radius:15px; padding:16px; background:#fff;}
-    .privacy-box h4 {margin:3px 0 6px 0; color:#172033;}
-    .privacy-box p {margin:0; color:#5b6879; line-height:1.5; font-size:.88rem;}
-    .privacy-icon {font-size:1.3rem;}
-    .section-label {font-size:.82rem; font-weight:800; color:#64748b; letter-spacing:.06em; text-transform:uppercase; margin:18px 0 8px 0;}
-    [data-testid="stExpander"] {border:1px solid #dfe6ee; border-radius:14px; margin-bottom:9px; overflow:hidden; background:#fff;}
-    [data-testid="stExpander"] summary {font-weight:700;}
-    [data-testid="stFileUploader"] {border-radius:12px;}
-    @media (max-width:700px) {
-        .app-header {align-items:flex-start; padding:15px;}
-        .header-badge {display:none;}
-        .upload-hero {padding:20px;}
-        .upload-title {font-size:1.55rem;}
-        .step-grid,.privacy-grid {grid-template-columns:1fr;}
-    }
+    .main .block-container {max-width: 1180px; padding-top: .65rem; padding-bottom: .8rem;}
+    .app-header {display:flex; justify-content:space-between; align-items:center; gap:12px; padding:11px 16px; border:1px solid #dfe6ee; border-radius:12px; background:#fff; box-shadow:0 2px 9px rgba(15,23,42,.045); margin-bottom:10px;}
+    .brand-row {display:flex; align-items:center; gap:10px;}
+    .brand-mark {width:43px; height:43px; border-radius:9px; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#173f67; color:#fff; font-weight:800; font-size:.60rem; line-height:1.05; letter-spacing:.04em;}
+    .brand-mark span {font-size:.68rem;}
+    .brand-title {font-size:1.22rem; font-weight:800; color:#172033; line-height:1.1;}
+    .brand-subtitle {font-size:.76rem; color:#64748b; margin-top:3px;}
+    .header-badge {border:1px solid #dbe4ee; background:#f8fafc; color:#334155; border-radius:999px; padding:5px 9px; font-size:.70rem; font-weight:700; white-space:nowrap;}
+    .upload-hero {border:1px solid #d8e2ec; border-radius:12px; padding:13px 16px; background:#f8fbff; margin-bottom:9px;}
+    .upload-kicker {font-size:.68rem; font-weight:800; letter-spacing:.07em; text-transform:uppercase; color:#25618d; margin-bottom:2px;}
+    .upload-title {font-size:1.32rem; font-weight:800; color:#172033; margin:0 0 3px 0;}
+    .upload-subtitle {font-size:.79rem; color:#526174; line-height:1.35; margin:0;}
+    .step-grid {display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-top:9px;}
+    .step-card {border:1px solid #e2e8f0; border-radius:8px; padding:7px 9px; background:#fff;}
+    .step-number {font-size:.60rem; font-weight:800; color:#25618d; text-transform:uppercase; letter-spacing:.05em;}
+    .step-text {font-size:.72rem; font-weight:650; color:#253247; margin-top:2px;}
+    .section-label {font-size:.70rem; font-weight:800; color:#64748b; letter-spacing:.05em; text-transform:uppercase; margin:8px 0 5px 0;}
+    .paper-card {border:1px solid #dfe6ee; border-radius:10px; padding:8px 9px; background:#fff; min-height:175px; box-shadow:0 1px 4px rgba(15,23,42,.025);}
+    .paper-title {font-size:.78rem; font-weight:800; color:#243247; margin-bottom:5px;}
+    [data-testid="stFileUploader"] {padding:0 !important; margin-bottom:3px !important;}
+    [data-testid="stFileUploaderDropzone"] {min-height:72px !important; padding:8px !important;}
+    [data-testid="stFileUploaderDropzoneInstructions"] {font-size:.68rem !important;}
+    [data-testid="stExpander"] {border:1px solid #dfe6ee; border-radius:9px; margin-bottom:5px; overflow:hidden; background:#fff;}
+    [data-testid="stExpander"] summary {font-weight:700; font-size:.78rem;}
+    .privacy-strip {display:grid; grid-template-columns:1fr 1fr; gap:7px; margin:9px 0 6px 0;}
+    .privacy-box {border:1px solid #dfe6ee; border-radius:9px; padding:8px 10px; background:#f8fafc;}
+    .privacy-box h4 {margin:0 0 2px 0; font-size:.75rem; color:#172033;}
+    .privacy-box p {margin:0; color:#5b6879; line-height:1.3; font-size:.68rem;}
+    .portal-note {font-size:.68rem; color:#64748b; text-align:center; margin-top:4px;}
+    @media (max-width:900px) {.main .block-container {padding-top:.45rem;} .step-grid,.privacy-strip {grid-template-columns:1fr;} .paper-card {min-height:auto;}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -880,13 +876,13 @@ url_public_id = query_params.get(
 st.markdown(
     """
     <div class="upload-hero">
-        <div class="upload-kicker">Step 1 of your result</div>
-        <div class="upload-title">📤 Upload your OMR sheets</div>
-        <p class="upload-subtitle">Start here. Upload all six response sheets, choose the booklet series printed on each sheet, and generate your marksheet.</p>
+        <div class="upload-kicker">BPSC-AE OMR Evaluation</div>
+        <div class="upload-title">📄 Upload OMR Sheets & Generate Marks</div>
+        <p class="upload-subtitle">Upload the six required response sheets, confirm each booklet series, and generate the candidate marksheet.</p>
         <div class="step-grid">
-            <div class="step-card"><div class="step-number">01 · Upload</div><div class="step-text">Add all 6 OMR sheets</div></div>
-            <div class="step-card"><div class="step-number">02 · Verify</div><div class="step-text">Select the printed booklet series</div></div>
-            <div class="step-card"><div class="step-number">03 · Result</div><div class="step-text">Generate your marksheet</div></div>
+            <div class="step-card"><div class="step-number">01 · Upload</div><div class="step-text">Add 6 OMR sheets</div></div>
+            <div class="step-card"><div class="step-number">02 · Verify</div><div class="step-text">Confirm booklet series</div></div>
+            <div class="step-card"><div class="step-number">03 · Result</div><div class="step-text">Generate marks & rank</div></div>
         </div>
     </div>
     """,
@@ -911,93 +907,48 @@ booklet_confirmed = {}
 
 
 # ====================================================
-# SIX PAPERS
+# SIX PAPERS — compact 3-column layout
 # ====================================================
 
-for code, meta in SUBJECT_META.items():
+omr_files = {}
+omr_sets = {}
+booklet_confirmed = {}
 
-    category_tag = (
-
-        "Qualifying Paper (Min 30%)"
-
-        if meta["type"] == "qualifying"
-
-        else
-
-        "Merit Paper"
-    )
-
-
-    available_sets = list(
-        OFFICIAL_KEYS[code].keys()
-    )
-
-
-    with st.expander(
-
-        f"📄 {code}: "
-        f"{meta['name']} "
-        f"[{category_tag}]",
-
-        expanded=True
-    ):
-
-        col_s, col_f = st.columns(
-            [1, 2]
-        )
-
-
-        with col_s:
-
+subjects = list(SUBJECT_META.items())
+for row_start in range(0, len(subjects), 3):
+    row = subjects[row_start:row_start + 3]
+    cols = st.columns(3, gap="small")
+    for col, (code, meta) in zip(cols, row):
+        with col:
+            st.markdown(
+                f'<div class="paper-card"><div class="paper-title">📄 {code} · {meta["name"]}</div>',
+                unsafe_allow_html=True,
+            )
+            omr_files[code] = st.file_uploader(
+                "OMR Sheet (PDF / JPG / PNG)",
+                type=["pdf", "jpg", "jpeg", "png"],
+                key=f"omr_{code}",
+                label_visibility="collapsed",
+            )
+            available_sets = list(OFFICIAL_KEYS[code].keys())
             omr_sets[code] = st.selectbox(
-                f"Select Question Booklet Series for {code}",
+                "Booklet Series",
                 options=available_sets,
                 key=f"set_{code}",
-                help=(
-                    "Look at the Question Booklet Series printed on this "
-                    "response sheet and select the matching booklet here. "
-                    "This selection is used to choose the answer key."
-                ),
             )
-
             booklet_confirmed[code] = st.checkbox(
-                f"I manually confirm that this response sheet is "
-                f"booklet {omr_sets[code]}",
+                f"Confirm booklet {omr_sets[code]}",
                 key=f"confirm_booklet_{code}",
             )
-
-
-        with col_f:
-
-            omr_files[code] = (
-                st.file_uploader(
-
-                    f"Upload {code} "
-                    "OMR Sheet "
-                    "(PDF / JPG / PNG)",
-
-                    type=[
-                        "pdf",
-                        "jpg",
-                        "jpeg",
-                        "png"
-                    ],
-
-                    key=
-                        f"omr_{code}"
-                )
-            )
-
+            st.markdown('</div>', unsafe_allow_html=True)
 
 uploaded_count = sum(1 for item in omr_files.values() if item is not None)
 confirmed_count = sum(1 for item in booklet_confirmed.values() if item)
 
 if uploaded_count == 6 and confirmed_count == 6:
-    st.success("✅ All 6 OMR sheets are uploaded and all booklet series are confirmed. You are ready to generate your marksheet.")
+    st.success("✅ 6/6 OMR sheets uploaded • 6/6 booklet series confirmed — ready to generate.")
 else:
-    st.info(
-        f"📋 **{uploaded_count}/6** OMR sheets uploaded  ·  **{confirmed_count}/6** booklet series confirmed"
-    )
+    st.info(f"📋 OMR sheets: **{uploaded_count}/6**  ·  Booklet confirmations: **{confirmed_count}/6**")
 
 st.divider()
 
@@ -1389,39 +1340,14 @@ if st.button(
 
 st.markdown(
     """
-    <div class="privacy-hero">
-        <h2>🔒 Privacy & Security</h2>
-        <p class="privacy-lead">
-            Your uploaded OMR files are processed for evaluation and are not stored in the ranking database.
-        </p>
+    <div class="privacy-strip">
+        <div class="privacy-box"><h4>🔒 Privacy & Security</h4><p>Uploaded OMR files are processed for evaluation and are not stored in the ranking database.</p></div>
+        <div class="privacy-box"><h4>🏆 BPSC-AE Merit List</h4><p>Use Rank Lookup or Merit Rank List below to view published ranking information.</p></div>
     </div>
+    <div class="portal-note">BPSC-AE Rank List Portal • OMR marks processing and merit ranking</div>
     """,
     unsafe_allow_html=True,
 )
-
-st.markdown(
-    """
-    <div class="privacy-grid">
-        <div class="privacy-box">
-            <div class="privacy-icon">🔐</div>
-            <h4>Private & Secure</h4>
-            <p>Your uploaded OMR files are processed for evaluation and are not stored in the ranking database.</p>
-        </div>
-        <div class="privacy-box">
-            <div class="privacy-icon">⚡</div>
-            <h4>Quick Result</h4>
-            <p>Upload the required sheets, verify the booklet series, and generate your marksheet in one step.</p>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.info(
-    "📌 **Only 2 things to remember:** Upload your OMR sheets and select the "
-    "correct booklet series printed on each sheet. Then tap **Generate Marksheet**."
-)
-
 
 # ============================================================
 # OTHER PORTAL TABS
