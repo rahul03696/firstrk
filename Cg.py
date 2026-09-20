@@ -805,101 +805,594 @@ st.set_page_config(
 )
 
 
-st.title(
-    "📝 BPSC OMR "
-    "Marksheet Portal"
+st.markdown(
+    """
+    <div class="app-header">
+        <div class="brand-row">
+            <div class="brand-mark">OMR</div>
+            <div>
+                <div class="brand-title">OMR Marksheet Portal</div>
+                <div class="brand-subtitle">Secure • Simple • Transparent evaluation</div>
+            </div>
+        </div>
+        <div class="header-badge">🔒 Secure processing</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 st.markdown(
     """
     <style>
-    .main .block-container {max-width: 1180px; padding-top: 2rem;}
-    .secure-card {
-        border: 1px solid rgba(49, 51, 63, .18);
-        border-radius: 18px;
-        padding: 18px 20px 8px 20px;
-        background: rgba(250, 250, 252, .72);
-        margin-bottom: 8px;
-    }
-    .secure-badge {
-        display: inline-block;
-        padding: 5px 10px;
-        border-radius: 999px;
-        font-size: .78rem;
-        font-weight: 700;
-        letter-spacing: .04em;
-    }
-    .result-label {font-size: .9rem; opacity: .72; margin-top: 12px;}
-    .anon-id {font-size: 2rem; font-weight: 800; letter-spacing: .08em;
-              margin: 0 0 12px 0;}
-    .privacy-note {
-        border-left: 4px solid #888;
-        padding: 12px 16px;
-        border-radius: 8px;
-        background: rgba(128,128,128,.08);
-    }
-    .privacy-hero {
-        border: 1px solid rgba(49, 51, 63, .16);
-        border-radius: 22px;
-        padding: 28px 28px 24px 28px;
-        margin: 10px 0 20px 0;
-        background: linear-gradient(135deg, rgba(245,248,255,.95), rgba(250,250,252,.95));
-        text-align: center;
-    }
-    .privacy-lock {
-        font-size: 2.4rem;
-        margin-bottom: 4px;
-    }
-    .privacy-hero h2 {
-        margin: 0;
-        font-size: 1.8rem;
-    }
-    .privacy-lead {
-        max-width: 760px;
-        margin: 10px auto 0 auto;
-        font-size: 1rem;
-        line-height: 1.6;
-        opacity: .82;
-    }
-    .privacy-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
-        margin-bottom: 18px;
-    }
-    .privacy-box {
-        border: 1px solid rgba(49, 51, 63, .14);
-        border-radius: 16px;
-        padding: 18px;
-        background: rgba(250,250,252,.7);
-    }
-    .privacy-box h4 {
-        margin: 4px 0 7px 0;
-    }
-    .privacy-box p {
-        margin: 0;
-        line-height: 1.55;
-        opacity: .78;
-        font-size: .92rem;
-    }
-    .privacy-icon {
-        font-size: 1.55rem;
-    }
-    @media (max-width: 700px) {
-        .privacy-grid {grid-template-columns: 1fr;}
+    .main .block-container {max-width: 1120px; padding-top: 1.25rem; padding-bottom: 3rem;}
+    .app-header {display:flex; justify-content:space-between; align-items:center; gap:16px; padding:18px 22px; border:1px solid #e5e7eb; border-radius:18px; background:#fff; box-shadow:0 4px 18px rgba(15,23,42,.05); margin-bottom:22px;}
+    .brand-row {display:flex; align-items:center; gap:13px;}
+    .brand-mark {width:48px; height:48px; border-radius:13px; display:flex; align-items:center; justify-content:center; background:#173f67; color:#fff; font-weight:800; font-size:.78rem; letter-spacing:.05em;}
+    .brand-title {font-size:1.18rem; font-weight:800; color:#172033; line-height:1.2;}
+    .brand-subtitle {font-size:.82rem; color:#64748b; margin-top:3px;}
+    .header-badge {border:1px solid #dbe4ee; background:#f8fafc; color:#334155; border-radius:999px; padding:7px 11px; font-size:.78rem; font-weight:700; white-space:nowrap;}
+    .upload-hero {border:1px solid #d8e2ec; border-radius:22px; padding:26px; background:linear-gradient(145deg,#f8fbff,#ffffff); box-shadow:0 8px 28px rgba(15,23,42,.06); margin-bottom:18px;}
+    .upload-kicker {font-size:.76rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#25618d; margin-bottom:7px;}
+    .upload-title {font-size:2rem; font-weight:850; color:#172033; margin:0 0 7px 0;}
+    .upload-subtitle {font-size:1rem; color:#526174; line-height:1.55; max-width:760px; margin:0;}
+    .step-grid {display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:20px;}
+    .step-card {border:1px solid #e2e8f0; border-radius:14px; padding:13px 14px; background:#fff;}
+    .step-number {font-size:.72rem; font-weight:800; color:#25618d; text-transform:uppercase; letter-spacing:.06em;}
+    .step-text {font-size:.88rem; font-weight:650; color:#253247; margin-top:4px;}
+    .privacy-hero {border:1px solid #e2e8f0; border-radius:18px; padding:20px 22px; margin:26px 0 12px 0; background:#f8fafc;}
+    .privacy-hero h2 {margin:0; font-size:1.25rem; color:#172033;}
+    .privacy-lead {margin:6px 0 0 0; color:#59677a; line-height:1.5; font-size:.9rem;}
+    .privacy-grid {display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-bottom:14px;}
+    .privacy-box {border:1px solid #e2e8f0; border-radius:15px; padding:16px; background:#fff;}
+    .privacy-box h4 {margin:3px 0 6px 0; color:#172033;}
+    .privacy-box p {margin:0; color:#5b6879; line-height:1.5; font-size:.88rem;}
+    .privacy-icon {font-size:1.3rem;}
+    .section-label {font-size:.82rem; font-weight:800; color:#64748b; letter-spacing:.06em; text-transform:uppercase; margin:18px 0 8px 0;}
+    [data-testid="stExpander"] {border:1px solid #dfe6ee; border-radius:14px; margin-bottom:9px; overflow:hidden; background:#fff;}
+    [data-testid="stExpander"] summary {font-weight:700;}
+    [data-testid="stFileUploader"] {border-radius:12px;}
+    @media (max-width:700px) {
+        .app-header {align-items:flex-start; padding:15px;}
+        .header-badge {display:none;}
+        .upload-hero {padding:20px;}
+        .upload-title {font-size:1.55rem;}
+        .step-grid,.privacy-grid {grid-template-columns:1fr;}
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+query_params = st.query_params
+
+
+url_public_id = query_params.get(
+    "public_id",
+    ""
+)
+
+
+# ============================================================
+# OMR UPLOAD — shown first when the app opens
+# ============================================================
+
+
+st.markdown(
+    """
+    <div class="upload-hero">
+        <div class="upload-kicker">Step 1 of your result</div>
+        <div class="upload-title">📤 Upload your OMR sheets</div>
+        <p class="upload-subtitle">Start here. Upload all six response sheets, choose the booklet series printed on each sheet, and generate your marksheet.</p>
+        <div class="step-grid">
+            <div class="step-card"><div class="step-number">01 · Upload</div><div class="step-text">Add all 6 OMR sheets</div></div>
+            <div class="step-card"><div class="step-number">02 · Verify</div><div class="step-text">Select the printed booklet series</div></div>
+            <div class="step-card"><div class="step-number">03 · Result</div><div class="step-text">Generate your marksheet</div></div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.info("💡 Your roll number is read from the OMR automatically — you do not need to type it.")
+
+# The upload section is always enabled; identity comes only from OMR.
+# All candidate identity data is obtained from the uploaded sheets.
+
+st.markdown('<div class="section-label">Six required response sheets</div>', unsafe_allow_html=True)
+
+
+
+omr_files = {}
+
+# The booklet series is intentionally NOT detected by OCR.
+# The user must manually select and confirm the booklet printed on each OMR.
+omr_sets = {}
+booklet_confirmed = {}
+
+
+# ====================================================
+# SIX PAPERS
+# ====================================================
+
+for code, meta in SUBJECT_META.items():
+
+    category_tag = (
+
+        "Qualifying Paper (Min 30%)"
+
+        if meta["type"] == "qualifying"
+
+        else
+
+        "Merit Paper"
+    )
+
+
+    available_sets = list(
+        OFFICIAL_KEYS[code].keys()
+    )
+
+
+    with st.expander(
+
+        f"📄 {code}: "
+        f"{meta['name']} "
+        f"[{category_tag}]",
+
+        expanded=True
+    ):
+
+        col_s, col_f = st.columns(
+            [1, 2]
+        )
+
+
+        with col_s:
+
+            omr_sets[code] = st.selectbox(
+                f"Select Question Booklet Series for {code}",
+                options=available_sets,
+                key=f"set_{code}",
+                help=(
+                    "Look at the Question Booklet Series printed on this "
+                    "response sheet and select the matching booklet here. "
+                    "This selection is used to choose the answer key."
+                ),
+            )
+
+            booklet_confirmed[code] = st.checkbox(
+                f"I manually confirm that this response sheet is "
+                f"booklet {omr_sets[code]}",
+                key=f"confirm_booklet_{code}",
+            )
+
+
+        with col_f:
+
+            omr_files[code] = (
+                st.file_uploader(
+
+                    f"Upload {code} "
+                    "OMR Sheet "
+                    "(PDF / JPG / PNG)",
+
+                    type=[
+                        "pdf",
+                        "jpg",
+                        "jpeg",
+                        "png"
+                    ],
+
+                    key=
+                        f"omr_{code}"
+                )
+            )
+
+
+uploaded_count = sum(1 for item in omr_files.values() if item is not None)
+confirmed_count = sum(1 for item in booklet_confirmed.values() if item)
+
+if uploaded_count == 6 and confirmed_count == 6:
+    st.success("✅ All 6 OMR sheets are uploaded and all booklet series are confirmed. You are ready to generate your marksheet.")
+else:
+    st.info(
+        f"📋 **{uploaded_count}/6** OMR sheets uploaded  ·  **{confirmed_count}/6** booklet series confirmed"
+    )
+
+st.divider()
+
+
+# ====================================================
+# CALCULATE
+# ====================================================
+
+if st.button(
+
+    "🚀 Generate My Marksheet",
+
+    type="primary"
+):
+
+    progress = st.progress(0, text="Starting OMR verification…")
+    status_box = st.empty()
+
+    # =================================================
+    # HARD GATE: EXACTLY SIX REQUIRED OMR SHEETS
+    # =================================================
+
+    missing_codes = [
+        code
+        for code in SUBJECT_META
+        if omr_files.get(code) is None
+    ]
+
+    if missing_codes:
+        st.error(
+            "❌ Marksheet NOT published. All six OMR sheets are required. "
+            f"Missing: {', '.join(missing_codes)}."
+        )
+        st.stop()
+
+    # Privacy control: reject unusually large uploads before processing.
+    oversized = []
+    for code, uploaded in omr_files.items():
+        if uploaded is not None:
+            try:
+                size_mb = uploaded.size / (1024 * 1024)
+                if size_mb > MAX_UPLOAD_MB:
+                    oversized.append(
+                        f"{code}: {size_mb:.1f} MB (limit {MAX_UPLOAD_MB} MB)"
+                    )
+            except Exception:
+                pass
+
+    if oversized:
+        st.error("Upload rejected because one or more files exceed the privacy/safety size limit.")
+        st.write("\n".join(f"- {item}" for item in oversized))
+        st.stop()
+
+    # UploadedFile objects are processed in memory only. This application
+    # never writes the original OMR bytes to the ranking database.
+    # =================================================
+    # HARD GATE: SAME STUDENT ACROSS ALL SIX SUBJECT SHEETS
+    # =================================================
+    # Student identity is determined ONLY by the six-digit bubbled
+    # Roll Number.  The printed OMR Sheet No. is deliberately ignored
+    # because it can be different on every subject paper.  The booklet
+    # series can also differ by subject and is checked separately only
+    # against that subject's selected answer key.
+
+    identity_results = {}
+    for code in SUBJECT_META:
+        identity_results[code] = extract_omr_identity(
+            omr_files[code]
+        )
+
+    normalized_rolls = {
+        code: _normalize_roll_number(identity.get("roll_no", ""))
+        for code, identity in identity_results.items()
+    }
+
+    # Do not display the detected roll number back to the browser/UI.
+    # Only show a privacy-safe verification status.
+    st.success(
+        "🔐 Identity verification completed across all six OMR sheets. "
+        "The detected roll number is not displayed."
+    )
+
+    roll_values = list(normalized_rolls.values())
+    all_rolls_present = all(bool(value) for value in roll_values)
+    same_roll = (
+        all_rolls_present
+        and len(set(roll_values)) == 1
+    )
+
+    if not same_roll:
+        st.error(
+            "❌ Marksheet NOT published. All six subject response sheets "
+            "must contain the same valid bubbled roll number."
+        )
+        st.warning(
+            "Different subjects may have different OMR Sheet Nos. and "
+            "different Question Booklet Series. Those fields are NOT used "
+            "to identify the student. Only the bubbled roll number is used "
+            "for cross-subject student matching. No score was saved and "
+            "no rank was generated."
+        )
+        st.stop()
+
+    # =================================================
+    # HARD GATE: MANUAL BOOKLET CONFIRMATION
+    # =================================================
+    # Booklet series is deliberately NOT detected from the OMR image.
+    # The student/operator must manually select the booklet printed on
+    # each response sheet and explicitly confirm it.  The selected
+    # booklet is then used to choose the corresponding answer key.
+
+    unconfirmed_booklets = [
+        f"{code}: booklet {omr_sets[code]} was not manually confirmed"
+        for code in SUBJECT_META
+        if not booklet_confirmed.get(code, False)
+    ]
+
+    if unconfirmed_booklets:
+        st.error(
+            "❌ Marksheet NOT published. The Question Booklet Series "
+            "must be manually confirmed for all six response sheets."
+        )
+        st.warning(
+            "For every paper, read the Question Booklet Series printed "
+            "on the response sheet, select the matching booklet above, "
+            "and tick the manual confirmation box. The selected booklet "
+            "will be used as the answer key for that paper. No score, "
+            "marksheet, or rank is saved until all six confirmations are made."
+        )
+        st.dataframe(
+            pd.DataFrame({"Booklet confirmation required": unconfirmed_booklets}),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.stop()
+
+    # Cross-subject student identity and manual booklet confirmations are
+    # now verified before scoring. Different subjects may have different
+    # booklet letters; each subject is scored only with the manually
+    # selected answer key for that subject. The real roll number remains
+    # private and is never shown publicly.
+    roll_no = roll_values[0]
+
+    paper_results = {}
+
+    merit_total = 0
+
+    merit_max = 0
+
+
+    # =================================================
+    # PROCESS EVERY PAPER
+    # =================================================
+
+    total_papers = len(SUBJECT_META)
+
+    for paper_index, (code, meta) in enumerate(SUBJECT_META.items(), start=1):
+
+        status_box.info(f"⚙️ Processing {paper_index}/{total_papers}: {meta['name']}…")
+        progress.progress(
+            (paper_index - 1) / total_papers,
+            text=f"Processing {code} — {meta['name']}"
+        )
+
+        selected_set = (
+            omr_sets[code]
+        )
+
+
+        official_key = (
+            OFFICIAL_KEYS[
+                code
+            ][
+                selected_set
+            ]
+        )
+
+
+        parsed_responses = (
+            parse_omr_file(
+                omr_files.get(code)
+            )
+        )
+
+        if not parsed_responses:
+            st.error(
+                f"❌ Marksheet NOT published. {code} OMR answers could not be read."
+            )
+            st.warning(
+                "No database record or rank was created. Please upload a clearer "
+                "OMR sheet and try again."
+            )
+            st.stop()
+
+
+        eval_res = evaluate_paper(
+
+            parsed_responses,
+
+            official_key
+        )
+
+
+        # ---------------------------------------------
+        # QUALIFYING
+        # ---------------------------------------------
+
+        is_passed = True
+
+
+        if meta["type"] == "qualifying":
+
+            is_passed = (
+
+                eval_res["pct"]
+                >=
+                meta["cutoff_pct"]
+            )
+
+
+        # ---------------------------------------------
+        # MERIT
+        # ---------------------------------------------
+
+        else:
+
+            merit_total += (
+                eval_res["score"]
+            )
+
+
+            merit_max += (
+                eval_res["max_marks"]
+            )
+
+
+        eval_res["passed"] = (
+            is_passed
+        )
+
+
+        eval_res["subject_name"] = (
+            meta["name"]
+        )
+
+
+        eval_res["type"] = (
+            meta["type"]
+        )
+
+
+        eval_res["set_name"] = (
+            selected_set
+        )
+
+
+        paper_results[code] = (
+            eval_res
+        )
+
+        progress.progress(
+            paper_index / total_papers,
+            text=f"Completed {paper_index}/{total_papers}: {meta['name']}"
+        )
+
+
+    status_box.success("✅ All OMR sheets processed. Generating your marksheet…")
+
+    # =================================================
+    # OVERALL QUALIFICATION
+    # =================================================
+
+    is_qualified = (
+
+        paper_results["P1"]["passed"]
+
+        and
+
+        paper_results["P2"]["passed"]
+    )
+
+
+    merit_pct = (
+
+        round(
+            (
+                merit_total
+                /
+                merit_max
+            )
+            * 100,
+            2
+        )
+
+        if merit_max > 0
+
+        else
+
+        0.0
+    )
+
+
+    # =================================================
+    # DATABASE
+    # =================================================
+    # IMPORTANT PRIVACY RULE:
+    # The persistent database stores ONLY:
+    #   - private roll number (identity key)
+    #   - anonymous public ID
+    #   - merit marks
+    #   - maximum merit marks
+    #
+    # OMR responses, answer keys, question-by-question results,
+    # English/Hindi marks, correct/wrong counts, and other paper details
+    # are NOT stored in the database.
+
+    db = load_data()
+
+    normalized_roll_no = str(roll_no).strip()
+
+    # If this roll number already exists, update that record instead of
+    # creating another historical record. Keep the existing Anonymous ID.
+    existing = next(
+        (
+            item for item in db
+            if str(item.get("roll_no", "")).strip() == normalized_roll_no
+        ),
+        None
+    )
+
+    if existing:
+        public_id = str(
+            existing.get("public_id") or generate_unique_public_id(db)
+        )
+    else:
+        public_id = generate_unique_public_id(db)
+
+    new_entry = {
+        "roll_no": normalized_roll_no,
+        "public_id": public_id,
+        "merit_total": round(merit_total, 2),
+        "merit_max": round(merit_max, 2),
+    }
+
+    # Remove any old record for this roll number, then save only the
+    # current result.
+    db = [
+        item for item in db
+        if str(item.get("roll_no", "")).strip() != normalized_roll_no
+    ]
+    db.append(new_entry)
+
+    # Current merit ranking: highest merit marks = rank 1.
+    # Recalculate every rank after each new/update submission.
+    db.sort(
+        key=lambda x: float(x.get("merit_total", 0)),
+        reverse=True
+    )
+
+    for rank_idx, record in enumerate(db, start=1):
+        record["rank"] = rank_idx
+
+    # save_data() strips the transient rank and any unexpected fields.
+    save_data(db)
+
+    st.balloons()
+
+    saved_record = next(
+        item for item in db
+        if str(item.get("public_id", "")) == public_id
+    )
+
+    render_marksheet(
+        saved_record,
+        len(db)
+    )
+
+    # Best-effort cleanup of transient OMR/evaluation objects from this
+    # Streamlit session after the result has been rendered.
+    # No OMR image/response data is placed into persistent storage.
+    del paper_results
+    del identity_results
+    del normalized_rolls
+
+
+# ============================================================
+# TAB 2
+# ============================================================
+
 st.markdown(
     """
     <div class="privacy-hero">
-        <div class="privacy-lock">🔒</div>
-        <h2>Upload OMR → Get Your Marksheet</h2>
+        <h2>🔒 Privacy & Security</h2>
         <p class="privacy-lead">
-            Upload your six OMR sheets below. The system reads them, checks the
-            booklet series, calculates your marks and generates your result.
+            Your uploaded OMR files are processed for evaluation and are not stored in the ranking database.
         </p>
     </div>
     """,
@@ -930,547 +1423,16 @@ st.info(
 )
 
 
-query_params = st.query_params
-
-
-url_public_id = query_params.get(
-    "public_id",
-    ""
-)
-
-
 # ============================================================
-# TABS
+# OTHER PORTAL TABS
 # ============================================================
-
 tabs = st.tabs([
-
-    "📤 Student OMR Portal",
-
     "🔍 Rank Lookup",
-
     "🏆 Merit Rank List"
 ])
 
-
-# ============================================================
-# TAB 1
-# ============================================================
-
 with tabs[0]:
 
-    st.subheader("📤 Upload Your OMR Sheets")
-
-    st.markdown(
-        """
-        ### Follow these 3 simple steps
-        **1. Upload** all 6 OMR response sheets (PDF/JPG/PNG).  
-        **2. Select** the Question Booklet Series printed on each sheet.  
-        **3. Tap** **🚀 Generate Marksheet** — your result is calculated automatically.
-        """
-    )
-
-    st.caption(
-        "Your roll number is read automatically from the OMR. You do not need to type it."
-    )
-
-    # The upload section is always enabled; identity comes only from OMR.
-    # All candidate identity data is obtained from the uploaded sheets.
-
-    st.write(
-
-        "### 📂 Upload Your OMR "
-        "Response Sheets & Select OMR Set Code"
-    )
-
-
-    omr_files = {}
-
-    # The booklet series is intentionally NOT detected by OCR.
-    # The user must manually select and confirm the booklet printed on each OMR.
-    omr_sets = {}
-    booklet_confirmed = {}
-
-
-    # ====================================================
-    # SIX PAPERS
-    # ====================================================
-
-    for code, meta in SUBJECT_META.items():
-
-        category_tag = (
-
-            "Qualifying Paper (Min 30%)"
-
-            if meta["type"] == "qualifying"
-
-            else
-
-            "Merit Paper"
-        )
-
-
-        available_sets = list(
-            OFFICIAL_KEYS[code].keys()
-        )
-
-
-        with st.expander(
-
-            f"📄 {code}: "
-            f"{meta['name']} "
-            f"[{category_tag}]",
-
-            expanded=False
-        ):
-
-            col_s, col_f = st.columns(
-                [1, 2]
-            )
-
-
-            with col_s:
-
-                omr_sets[code] = st.selectbox(
-                    f"Select Question Booklet Series for {code}",
-                    options=available_sets,
-                    key=f"set_{code}",
-                    help=(
-                        "Look at the Question Booklet Series printed on this "
-                        "response sheet and select the matching booklet here. "
-                        "This selection is used to choose the answer key."
-                    ),
-                )
-
-                booklet_confirmed[code] = st.checkbox(
-                    f"I manually confirm that this response sheet is "
-                    f"booklet {omr_sets[code]}",
-                    key=f"confirm_booklet_{code}",
-                )
-
-
-            with col_f:
-
-                omr_files[code] = (
-                    st.file_uploader(
-
-                        f"Upload {code} "
-                        "OMR Sheet "
-                        "(PDF / JPG / PNG)",
-
-                        type=[
-                            "pdf",
-                            "jpg",
-                            "jpeg",
-                            "png"
-                        ],
-
-                        key=
-                            f"omr_{code}"
-                    )
-                )
-
-
-    uploaded_count = sum(1 for item in omr_files.values() if item is not None)
-    confirmed_count = sum(1 for item in booklet_confirmed.values() if item)
-
-    if uploaded_count == 6 and confirmed_count == 6:
-        st.success("✅ All 6 OMR sheets are uploaded and all booklet series are confirmed. You are ready to generate your marksheet.")
-    else:
-        st.info(
-            f"📋 Upload status: **{uploaded_count}/6 OMR sheets** • "
-            f"Booklet confirmation: **{confirmed_count}/6**"
-        )
-
-    st.divider()
-
-
-    # ====================================================
-    # CALCULATE
-    # ====================================================
-
-    if st.button(
-
-        "🚀 Generate My Marksheet",
-
-        type="primary"
-    ):
-
-        progress = st.progress(0, text="Starting OMR verification…")
-        status_box = st.empty()
-
-        # =================================================
-        # HARD GATE: EXACTLY SIX REQUIRED OMR SHEETS
-        # =================================================
-
-        missing_codes = [
-            code
-            for code in SUBJECT_META
-            if omr_files.get(code) is None
-        ]
-
-        if missing_codes:
-            st.error(
-                "❌ Marksheet NOT published. All six OMR sheets are required. "
-                f"Missing: {', '.join(missing_codes)}."
-            )
-            st.stop()
-
-        # Privacy control: reject unusually large uploads before processing.
-        oversized = []
-        for code, uploaded in omr_files.items():
-            if uploaded is not None:
-                try:
-                    size_mb = uploaded.size / (1024 * 1024)
-                    if size_mb > MAX_UPLOAD_MB:
-                        oversized.append(
-                            f"{code}: {size_mb:.1f} MB (limit {MAX_UPLOAD_MB} MB)"
-                        )
-                except Exception:
-                    pass
-
-        if oversized:
-            st.error("Upload rejected because one or more files exceed the privacy/safety size limit.")
-            st.write("\n".join(f"- {item}" for item in oversized))
-            st.stop()
-
-        # UploadedFile objects are processed in memory only. This application
-        # never writes the original OMR bytes to the ranking database.
-        # =================================================
-        # HARD GATE: SAME STUDENT ACROSS ALL SIX SUBJECT SHEETS
-        # =================================================
-        # Student identity is determined ONLY by the six-digit bubbled
-        # Roll Number.  The printed OMR Sheet No. is deliberately ignored
-        # because it can be different on every subject paper.  The booklet
-        # series can also differ by subject and is checked separately only
-        # against that subject's selected answer key.
-
-        identity_results = {}
-        for code in SUBJECT_META:
-            identity_results[code] = extract_omr_identity(
-                omr_files[code]
-            )
-
-        normalized_rolls = {
-            code: _normalize_roll_number(identity.get("roll_no", ""))
-            for code, identity in identity_results.items()
-        }
-
-        # Do not display the detected roll number back to the browser/UI.
-        # Only show a privacy-safe verification status.
-        st.success(
-            "🔐 Identity verification completed across all six OMR sheets. "
-            "The detected roll number is not displayed."
-        )
-
-        roll_values = list(normalized_rolls.values())
-        all_rolls_present = all(bool(value) for value in roll_values)
-        same_roll = (
-            all_rolls_present
-            and len(set(roll_values)) == 1
-        )
-
-        if not same_roll:
-            st.error(
-                "❌ Marksheet NOT published. All six subject response sheets "
-                "must contain the same valid bubbled roll number."
-            )
-            st.warning(
-                "Different subjects may have different OMR Sheet Nos. and "
-                "different Question Booklet Series. Those fields are NOT used "
-                "to identify the student. Only the bubbled roll number is used "
-                "for cross-subject student matching. No score was saved and "
-                "no rank was generated."
-            )
-            st.stop()
-
-        # =================================================
-        # HARD GATE: MANUAL BOOKLET CONFIRMATION
-        # =================================================
-        # Booklet series is deliberately NOT detected from the OMR image.
-        # The student/operator must manually select the booklet printed on
-        # each response sheet and explicitly confirm it.  The selected
-        # booklet is then used to choose the corresponding answer key.
-
-        unconfirmed_booklets = [
-            f"{code}: booklet {omr_sets[code]} was not manually confirmed"
-            for code in SUBJECT_META
-            if not booklet_confirmed.get(code, False)
-        ]
-
-        if unconfirmed_booklets:
-            st.error(
-                "❌ Marksheet NOT published. The Question Booklet Series "
-                "must be manually confirmed for all six response sheets."
-            )
-            st.warning(
-                "For every paper, read the Question Booklet Series printed "
-                "on the response sheet, select the matching booklet above, "
-                "and tick the manual confirmation box. The selected booklet "
-                "will be used as the answer key for that paper. No score, "
-                "marksheet, or rank is saved until all six confirmations are made."
-            )
-            st.dataframe(
-                pd.DataFrame({"Booklet confirmation required": unconfirmed_booklets}),
-                hide_index=True,
-                use_container_width=True,
-            )
-            st.stop()
-
-        # Cross-subject student identity and manual booklet confirmations are
-        # now verified before scoring. Different subjects may have different
-        # booklet letters; each subject is scored only with the manually
-        # selected answer key for that subject. The real roll number remains
-        # private and is never shown publicly.
-        roll_no = roll_values[0]
-
-        paper_results = {}
-
-        merit_total = 0
-
-        merit_max = 0
-
-
-        # =================================================
-        # PROCESS EVERY PAPER
-        # =================================================
-
-        total_papers = len(SUBJECT_META)
-
-        for paper_index, (code, meta) in enumerate(SUBJECT_META.items(), start=1):
-
-            status_box.info(f"⚙️ Processing {paper_index}/{total_papers}: {meta['name']}…")
-            progress.progress(
-                (paper_index - 1) / total_papers,
-                text=f"Processing {code} — {meta['name']}"
-            )
-
-            selected_set = (
-                omr_sets[code]
-            )
-
-
-            official_key = (
-                OFFICIAL_KEYS[
-                    code
-                ][
-                    selected_set
-                ]
-            )
-
-
-            parsed_responses = (
-                parse_omr_file(
-                    omr_files.get(code)
-                )
-            )
-
-            if not parsed_responses:
-                st.error(
-                    f"❌ Marksheet NOT published. {code} OMR answers could not be read."
-                )
-                st.warning(
-                    "No database record or rank was created. Please upload a clearer "
-                    "OMR sheet and try again."
-                )
-                st.stop()
-
-
-            eval_res = evaluate_paper(
-
-                parsed_responses,
-
-                official_key
-            )
-
-
-            # ---------------------------------------------
-            # QUALIFYING
-            # ---------------------------------------------
-
-            is_passed = True
-
-
-            if meta["type"] == "qualifying":
-
-                is_passed = (
-
-                    eval_res["pct"]
-                    >=
-                    meta["cutoff_pct"]
-                )
-
-
-            # ---------------------------------------------
-            # MERIT
-            # ---------------------------------------------
-
-            else:
-
-                merit_total += (
-                    eval_res["score"]
-                )
-
-
-                merit_max += (
-                    eval_res["max_marks"]
-                )
-
-
-            eval_res["passed"] = (
-                is_passed
-            )
-
-
-            eval_res["subject_name"] = (
-                meta["name"]
-            )
-
-
-            eval_res["type"] = (
-                meta["type"]
-            )
-
-
-            eval_res["set_name"] = (
-                selected_set
-            )
-
-
-            paper_results[code] = (
-                eval_res
-            )
-
-            progress.progress(
-                paper_index / total_papers,
-                text=f"Completed {paper_index}/{total_papers}: {meta['name']}"
-            )
-
-
-        status_box.success("✅ All OMR sheets processed. Generating your marksheet…")
-
-        # =================================================
-        # OVERALL QUALIFICATION
-        # =================================================
-
-        is_qualified = (
-
-            paper_results["P1"]["passed"]
-
-            and
-
-            paper_results["P2"]["passed"]
-        )
-
-
-        merit_pct = (
-
-            round(
-                (
-                    merit_total
-                    /
-                    merit_max
-                )
-                * 100,
-                2
-            )
-
-            if merit_max > 0
-
-            else
-
-            0.0
-        )
-
-
-        # =================================================
-        # DATABASE
-        # =================================================
-        # IMPORTANT PRIVACY RULE:
-        # The persistent database stores ONLY:
-        #   - private roll number (identity key)
-        #   - anonymous public ID
-        #   - merit marks
-        #   - maximum merit marks
-        #
-        # OMR responses, answer keys, question-by-question results,
-        # English/Hindi marks, correct/wrong counts, and other paper details
-        # are NOT stored in the database.
-
-        db = load_data()
-
-        normalized_roll_no = str(roll_no).strip()
-
-        # If this roll number already exists, update that record instead of
-        # creating another historical record. Keep the existing Anonymous ID.
-        existing = next(
-            (
-                item for item in db
-                if str(item.get("roll_no", "")).strip() == normalized_roll_no
-            ),
-            None
-        )
-
-        if existing:
-            public_id = str(
-                existing.get("public_id") or generate_unique_public_id(db)
-            )
-        else:
-            public_id = generate_unique_public_id(db)
-
-        new_entry = {
-            "roll_no": normalized_roll_no,
-            "public_id": public_id,
-            "merit_total": round(merit_total, 2),
-            "merit_max": round(merit_max, 2),
-        }
-
-        # Remove any old record for this roll number, then save only the
-        # current result.
-        db = [
-            item for item in db
-            if str(item.get("roll_no", "")).strip() != normalized_roll_no
-        ]
-        db.append(new_entry)
-
-        # Current merit ranking: highest merit marks = rank 1.
-        # Recalculate every rank after each new/update submission.
-        db.sort(
-            key=lambda x: float(x.get("merit_total", 0)),
-            reverse=True
-        )
-
-        for rank_idx, record in enumerate(db, start=1):
-            record["rank"] = rank_idx
-
-        # save_data() strips the transient rank and any unexpected fields.
-        save_data(db)
-
-        st.balloons()
-
-        saved_record = next(
-            item for item in db
-            if str(item.get("public_id", "")) == public_id
-        )
-
-        render_marksheet(
-            saved_record,
-            len(db)
-        )
-
-        # Best-effort cleanup of transient OMR/evaluation objects from this
-        # Streamlit session after the result has been rendered.
-        # No OMR image/response data is placed into persistent storage.
-        del paper_results
-        del identity_results
-        del normalized_rolls
-
-
-# ============================================================
-# TAB 2
-# ============================================================
-
-with tabs[1]:
 
     st.subheader(
         "🔍 Find Your Current Rank"
@@ -1519,7 +1481,7 @@ with tabs[1]:
 # TAB 3
 # ============================================================
 
-with tabs[2]:
+with tabs[1]:
 
     st.subheader(
         "🏆 Live Merit Rank List"
