@@ -791,6 +791,510 @@ def render_marksheet(record, total_candidates):
 
 
 # ============================================================
+# OMR IMAGE / BUBBLE READER
+# ============================================================
+
+def _read_uploaded_image(uploaded_file):
+    """Render the first page of an uploaded PDF or read an image upload."""
+    if uploaded_file is None:
+        raise ValueError("No OMR file was supplied.")
+
+    raw = uploaded_file.getvalue()
+    if not raw:
+        raise ValueError("The uploaded OMR file is empty.")
+
+    name = str(getattr(uploaded_file, "name", "")).lower()
+
+    if name.endswith(".pdf"):
+        if fitz is None:
+            raise RuntimeError(
+                "PDF support is unavailable. Install PyMuPDF (fitz)."
+            )
+        try:
+            doc = fitz.open(stream=raw, filetype="pdf")
+            if len(doc) == 0:
+                raise ValueError("The uploaded PDF contains no pages.")
+            page = doc.load_page(0)
+            # A moderate render scale keeps Streamlit Cloud memory usage reasonable.
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+            return image
+        except Exception as exc:
+            raise ValueError(
+                f"Could not render the uploaded PDF: {type(exc).__name__}."
+            ) from exc
+
+    try:
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as exc:
+        raise ValueError(
+            "The uploaded file is not a readable JPG/PNG image."
+        ) from exc
+
+
+def _image_gray(image):
+    """Create a clean grayscale image for OCR/OMR processing."""
+    gray = np.array(image.convert("L"))
+    h, w = gray.shape[:2]
+
+    # Keep very large phone/scanner images manageable.
+    max_dim = 2600
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        gray = cv2.resize(
+            gray,
+            (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    return gray
+
+
+def _darkness(gray, cx, cy, radius):
+    """Return ink darkness inside a circular bubble."""
+    h, w = gray.shape[:2]
+    r = max(2, int(radius * 0.55))
+    x1 = max(0, int(cx - r))
+    x2 = min(w, int(cx + r + 1))
+    y1 = max(0, int(cy - r))
+    y2 = min(h, int(cy + r + 1))
+    roi = gray[y1:y2, x1:x2]
+    if roi.size == 0:
+        return 0.0
+    return float(255.0 - np.mean(roi))
+
+
+def _bubble_candidates(gray):
+    """
+    Find likely OMR bubbles using Hough circles.
+
+    The routine is deliberately permissive because scans/photos can have
+    different resolutions. Downstream grouping removes unrelated circles.
+    """
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    h, w = gray.shape[:2]
+    min_dim = min(h, w)
+
+    min_r = max(5, int(min_dim * 0.004))
+    max_r = max(min_r + 4, int(min_dim * 0.018))
+
+    circles = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=max(8, int(min_r * 1.6)),
+        param1=100,
+        param2=24,
+        minRadius=min_r,
+        maxRadius=max_r,
+    )
+
+    if circles is None:
+        return []
+
+    result = []
+    for x, y, r in np.round(circles[0]).astype(int):
+        if 0 <= x < w and 0 <= y < h:
+            result.append((int(x), int(y), int(r)))
+    return result
+
+
+def _cluster_axis(values, tolerance):
+    """Cluster 1-D coordinates while preserving sorted order."""
+    if not values:
+        return []
+
+    groups = [[values[0]]]
+    for value in values[1:]:
+        if abs(value - np.median(groups[-1])) <= tolerance:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return [float(np.median(g)) for g in groups]
+
+
+def _decode_roll_from_bubbles(gray, candidates):
+    """
+    Decode a six-digit BPSC-style bubbled roll number.
+
+    The expected layout is 6 digit columns × 10 digit rows. The method
+    searches the upper part of the sheet for a dense 6-column/10-row grid.
+    """
+    h, w = gray.shape[:2]
+    upper = [
+        c for c in candidates
+        if c[1] < h * 0.45 and c[0] < w * 0.65
+    ]
+
+    if len(upper) < 35:
+        raise ValueError("Roll-number bubble grid could not be located.")
+
+    # Build x-columns from the detected circles.
+    xs = sorted(c[0] for c in upper)
+    median_r = max(4.0, float(np.median([c[2] for c in upper])))
+    x_tol = max(8.0, median_r * 2.2)
+    x_centers = _cluster_axis(xs, x_tol)
+
+    if len(x_centers) < 6:
+        raise ValueError("Could not identify the six roll-number columns.")
+
+    # Try every group of six neighboring columns and score grid regularity.
+    best = None
+    for start in range(0, len(x_centers) - 5):
+        cols = x_centers[start:start + 6]
+        selected = []
+        for xc in cols:
+            col = sorted(
+                [c for c in upper if abs(c[0] - xc) <= x_tol],
+                key=lambda c: c[1],
+            )
+            # Collapse duplicate detections at nearly the same y.
+            ys = []
+            for c in col:
+                if not ys or abs(c[1] - ys[-1][1]) > median_r * 1.4:
+                    ys.append(c)
+                elif c[2] > ys[-1][2]:
+                    ys[-1] = c
+            selected.append(ys)
+
+        if all(len(c) >= 8 for c in selected):
+            score = sum(min(len(c), 10) for c in selected)
+            if best is None or score > best[0]:
+                best = (score, selected)
+
+    if best is None:
+        raise ValueError(
+            "Roll-number grid was detected, but six complete digit columns "
+            "could not be resolved."
+        )
+
+    columns = best[1]
+    digits = []
+
+    for col in columns:
+        # Select the ten circles spanning the most regular vertical range.
+        col = sorted(col, key=lambda c: c[1])
+        if len(col) > 10:
+            best_ten = None
+            for i in range(len(col) - 9):
+                chunk = col[i:i + 10]
+                gaps = np.diff([c[1] for c in chunk])
+                regularity = float(np.std(gaps)) if len(gaps) else 999.0
+                if best_ten is None or regularity < best_ten[0]:
+                    best_ten = (regularity, chunk)
+            col = best_ten[1]
+
+        if len(col) != 10:
+            raise ValueError("An incomplete roll-number digit column was found.")
+
+        scores = [_darkness(gray, c[0], c[1], c[2]) for c in col]
+        order = np.argsort(scores)[::-1]
+        top = int(order[0])
+        second = float(scores[int(order[1])])
+
+        # A very weak/ambiguous column is safer to reject than silently
+        # publishing a wrong candidate identity.
+        if scores[top] < 22 or scores[top] - second < 4:
+            raise ValueError(
+                "The roll-number bubbles are too faint or ambiguous to read."
+            )
+        digits.append(str(top))
+
+    roll = "".join(digits)
+    if not re.fullmatch(r"\d{6}", roll):
+        raise ValueError("A valid six-digit roll number could not be decoded.")
+    return roll
+
+
+def extract_omr_identity(uploaded_file):
+    """
+    Read the candidate's six-digit bubbled roll number.
+
+    The supplied BPSC AE sheet is parsed using its fixed, page-relative
+    six-column roll grid first.  A generic CV/OCR fallback is retained for
+    slightly different scans.
+    """
+    image = _read_uploaded_image(uploaded_file)
+    gray = _image_gray(image)
+
+    try:
+        roll = _decode_bpsc_roll_layout(gray)
+        return {"roll_no": roll}
+    except ValueError as layout_error:
+        candidates = _bubble_candidates(gray)
+        if candidates:
+            try:
+                roll = _decode_roll_from_bubbles(gray, candidates)
+                return {"roll_no": roll}
+            except ValueError:
+                pass
+
+        if pytesseract is not None:
+            text = pytesseract.image_to_string(gray, config="--psm 11")
+            matches = re.findall(r"(?<!\d)\d{6}(?!\d)", text)
+            if len(matches) == 1:
+                return {"roll_no": matches[0]}
+
+        raise ValueError(
+            "Could not reliably read the six-digit roll number from this OMR. "
+            f"Layout reader: {layout_error}"
+        )
+
+
+def _normalize_roll_number(value):
+    """Normalize a decoded roll number and enforce BPSC's six-digit format."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits if len(digits) == 6 else ""
+
+
+def _group_answer_rows(candidates, gray):
+    """
+    Locate 50 answer rows, each containing four option bubbles.
+
+    This is layout-tolerant rather than tied to one scanner resolution.
+    """
+    h, w = gray.shape[:2]
+    # The answer area is normally below the identity/booklet area.
+    work = [
+        c for c in candidates
+        if c[1] > h * 0.22 and c[1] < h * 0.98
+    ]
+    if len(work) < 150:
+        return []
+
+    median_r = max(4.0, float(np.median([c[2] for c in work])))
+    y_tol = max(5.0, median_r * 1.7)
+
+    work.sort(key=lambda c: c[1])
+    rows = []
+    for c in work:
+        if not rows or abs(c[1] - np.median([p[1] for p in rows[-1]])) > y_tol:
+            rows.append([c])
+        else:
+            rows[-1].append(c)
+
+    row_candidates = []
+    for row in rows:
+        row = sorted(row, key=lambda c: c[0])
+        if len(row) < 4:
+            continue
+
+        # Pick four bubbles with the widest, most regular spacing.
+        if len(row) > 4:
+            best = None
+            for i in range(len(row) - 3):
+                chunk = row[i:i + 4]
+                gaps = np.diff([c[0] for c in chunk])
+                if np.all(gaps > 0):
+                    regularity = float(np.std(gaps))
+                    span = float(chunk[-1][0] - chunk[0][0])
+                    score = regularity - 0.001 * span
+                    if best is None or score < best[0]:
+                        best = (score, chunk)
+            row = best[1] if best else row[:4]
+
+        if len(row) == 4:
+            row_candidates.append(row)
+
+    # Keep the longest sequence of rows with similar x geometry.
+    if len(row_candidates) < 50:
+        return []
+
+    best_window = None
+    for i in range(len(row_candidates) - 49):
+        window = row_candidates[i:i + 50]
+        x_patterns = np.array(
+            [[c[0] for c in row] for row in window],
+            dtype=float,
+        )
+        spread = float(np.mean(np.std(x_patterns, axis=0)))
+        if best_window is None or spread < best_window[0]:
+            best_window = (spread, window)
+
+    return best_window[1] if best_window else []
+
+
+
+# ---------------------------------------------------------------------------
+# BPSC AE OMR SHEET (the uploaded sample layout)
+# ---------------------------------------------------------------------------
+# The supplied OMR is a portrait A4-style sheet with:
+#   - six roll-number columns at the upper-left;
+#   - five answer blocks, each containing 10 questions x 4 options;
+#   - printed booklet series (for example "J") in the centre.
+#
+# These coordinates are stored as page-relative fractions so the reader works
+# across PDF render resolutions.  This is intentionally preferred over
+# unrestricted Hough-circle grouping because the sample sheet contains many
+# non-answer circles/marks and the watermark can confuse a generic detector.
+
+_BPSC_ROLL_X = (
+    0.16322, 0.20042, 0.23980, 0.27741, 0.31528, 0.35386
+)
+_BPSC_ROLL_Y = (
+    0.17458, 0.18409, 0.19418, 0.20534, 0.21568,
+    0.22494, 0.23474, 0.24406, 0.25398, 0.26407
+)
+_BPSC_ANSWER_X = (
+    (0.16314, 0.18220, 0.20109, 0.22166),
+    (0.31537, 0.33401, 0.35382, 0.37372),
+    (0.46776, 0.48766, 0.50647, 0.52578),
+    (0.62024, 0.63997, 0.65894, 0.67783),
+    (0.77246, 0.79202, 0.81175, 0.83073),
+)
+_BPSC_ANSWER_Y = (
+    0.30463, 0.32482, 0.34501, 0.36520, 0.38599,
+    0.40618, 0.42577, 0.44537, 0.46615, 0.48575
+)
+
+
+def _normalized_patch_darkness(gray, x_frac, y_frac, radius_frac=0.006):
+    """Return ink darkness at a known BPSC OMR bubble position."""
+    h, w = gray.shape[:2]
+    x = int(round(x_frac * w))
+    y = int(round(y_frac * h))
+    radius = max(4, int(round(radius_frac * min(w, h))))
+
+    x0 = max(0, x - radius)
+    x1 = min(w, x + radius + 1)
+    y0 = max(0, y - radius)
+    y1 = min(h, y + radius + 1)
+
+    patch = gray[y0:y1, x0:x1]
+    if patch.size == 0:
+        return 0.0
+    return float(255.0 - np.mean(patch))
+
+
+def _decode_bpsc_roll_layout(gray):
+    """Decode the six-digit bubbled roll number from the supplied layout."""
+    scores = []
+    for x in _BPSC_ROLL_X:
+        scores.append([
+            _normalized_patch_darkness(gray, x, y, radius_frac=0.0055)
+            for y in _BPSC_ROLL_Y
+        ])
+
+    digits = []
+    for column in scores:
+        order = np.argsort(column)[::-1]
+        best = int(order[0])
+        second = float(column[int(order[1])])
+
+        # Filled bubbles in the supplied sheet are far darker than the
+        # printed empty circles.  Require both absolute darkness and margin.
+        if column[best] < 115 or column[best] - second < 70:
+            raise ValueError(
+                "Roll number could not be read confidently from the six "
+                "digit columns."
+            )
+        digits.append(str(best))
+
+    roll = "".join(digits)
+    if not re.fullmatch(r"\d{6}", roll):
+        raise ValueError("The OMR does not contain a valid six-digit roll number.")
+    return roll
+
+
+def _parse_bpsc_answer_layout(gray):
+    """Read all 50 A/B/C/D responses from the supplied BPSC OMR layout."""
+    responses = {}
+    q_no = 1
+
+    for block_x in _BPSC_ANSWER_X:
+        for y in _BPSC_ANSWER_Y:
+            option_scores = [
+                _normalized_patch_darkness(
+                    gray, x, y, radius_frac=0.0052
+                )
+                for x in block_x
+            ]
+
+            order = np.argsort(option_scores)[::-1]
+            best = int(order[0])
+            second = float(option_scores[int(order[1])])
+
+            # Empty bubbles have printed outlines, so absolute darkness alone
+            # is not enough.  A real filled response is both darker and
+            # clearly separated from the other three options.
+            if (
+                option_scores[best] >= 105
+                and option_scores[best] - second >= 45
+            ):
+                responses[q_no] = OPTION_MAP[best]
+            else:
+                # Blank and multiple-marked responses are not silently guessed.
+                responses[q_no] = ""
+
+            q_no += 1
+
+    if len(responses) != 50:
+        raise ValueError("The BPSC OMR answer grid could not be read.")
+    return responses
+
+
+def parse_omr_file(uploaded_file):
+    """
+    Parse the 50 answers from the supplied BPSC AE OMR sheet.
+
+    The sheet has five vertical answer blocks:
+      questions 1-10, 11-20, 21-30, 31-40, 41-50.
+    Each row has four bubbles in A/B/C/D order.
+
+    A response is returned only when one bubble is clearly filled. Blank or
+    ambiguous/multiple marks are returned as an empty response.
+    """
+    image = _read_uploaded_image(uploaded_file)
+    gray = _image_gray(image)
+
+    # Use the exact supplied-sheet geometry first. This avoids the watermark,
+    # printed circles and page decorations being mistaken for answer bubbles.
+    try:
+        responses = _parse_bpsc_answer_layout(gray)
+
+        # Require a meaningful number of confident answers. This prevents an
+        # unrelated portrait PDF from accidentally being treated as an OMR.
+        confident = sum(bool(v) for v in responses.values())
+        if confident < 5:
+            raise ValueError(
+                "Too few filled answer bubbles were detected in the BPSC "
+                "answer grid."
+            )
+        return responses
+    except ValueError as layout_error:
+        # Retain the previous layout-tolerant detector as a fallback for
+        # modestly different scans/templates.
+        candidates = _bubble_candidates(gray)
+        rows = _group_answer_rows(candidates, gray)
+        if len(rows) == 50:
+            responses = {}
+            for q_no, row in enumerate(rows, start=1):
+                scores = [_darkness(gray, c[0], c[1], c[2]) for c in row]
+                order = np.argsort(scores)[::-1]
+                best = int(order[0])
+                second = float(scores[int(order[1])])
+                responses[q_no] = (
+                    OPTION_MAP[best]
+                    if scores[best] >= 30 and scores[best] - second >= 5
+                    else ""
+                )
+            if sum(bool(v) for v in responses.values()) >= 5:
+                return responses
+
+        raise ValueError(
+            "Could not reliably read the 50-answer BPSC OMR grid. "
+            f"Layout reader: {layout_error}"
+        )
+
+
+def evaluate_paper(student_responses, official_key):
+    """Evaluate one 50-question paper using the existing marking engine."""
+    engine = OMREvaluationEngine(official_key)
+    return engine.evaluate_responses(student_responses)
+
+
+# ============================================================
 # STREAMLIT PAGE CONFIG
 # ============================================================
 
@@ -1014,10 +1518,17 @@ if st.button(
     # against that subject's selected answer key.
 
     identity_results = {}
-    for code in SUBJECT_META:
-        identity_results[code] = extract_omr_identity(
-            omr_files[code]
+    try:
+        for code in SUBJECT_META:
+            identity_results[code] = extract_omr_identity(
+                omr_files[code]
+            )
+    except (ValueError, RuntimeError) as exc:
+        st.error(
+            "❌ Marksheet NOT published. OMR identity could not be read reliably."
         )
+        st.warning(str(exc))
+        st.stop()
 
     normalized_rolls = {
         code: _normalize_roll_number(identity.get("roll_no", ""))
@@ -1127,11 +1638,17 @@ if st.button(
         )
 
 
-        parsed_responses = (
-            parse_omr_file(
+        try:
+            parsed_responses = parse_omr_file(
                 omr_files.get(code)
             )
-        )
+        except (ValueError, RuntimeError) as exc:
+            st.error(
+                f"❌ Marksheet NOT published. {code} OMR answers could not be "
+                "read reliably."
+            )
+            st.warning(str(exc))
+            st.stop()
 
         if not parsed_responses:
             st.error(
