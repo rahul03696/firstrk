@@ -52,6 +52,7 @@ except ImportError:
 # IMPORTANT: set OMR_DATABASE_KEY as a Streamlit secret or environment
 # variable. Never hard-code it in this source file and never commit it.
 ENCRYPTED_ENCRYPTED_DATA_FILE = "bpsc_leaderboard_secure.enc"
+PLAIN_RANKING_DATA_FILE = "bpsc_leaderboard.json"
 
 # Encrypted ranking database key.
 # No administrator password is required to publish the merit list.
@@ -640,163 +641,90 @@ class OMREvaluationEngine:
 # ============================================================
 
 def _get_fernet():
-    """Return the encryption object or fail closed.
-
-    The encryption key is deliberately NOT generated or stored by this app.
-    It must be supplied externally (environment variable or Streamlit secret).
-    This prevents the source code from containing the decryption key.
-    """
-    if Fernet is None:
-        st.error(
-            "Secure storage is unavailable: the 'cryptography' package is not installed."
-        )
-        st.stop()
-
-    if not OMR_DATABASE_KEY:
-        st.error(
-            "Secure storage is locked. The administrator must configure "
-            "OMR_DATABASE_KEY as a secret/environment variable before the app can run."
-        )
-        st.stop()
-
+    """Return Fernet only when an external database key is configured."""
+    if Fernet is None or not OMR_DATABASE_KEY:
+        return None
     try:
-        key = OMR_DATABASE_KEY.encode("ascii")
-        return Fernet(key)
+        return Fernet(OMR_DATABASE_KEY.encode("ascii"))
     except Exception:
-        st.error(
-            "Secure storage is locked because OMR_DATABASE_KEY is invalid. "
-            "Use a valid Fernet key."
-        )
-        st.stop()
+        return None
 
 
-def load_data():
-    """Load only the minimal encrypted ranking database.
-
-    The file contains no OMR images, answer selections, answer keys,
-    question-level results, or English/Hindi marks.
-    """
-    if not os.path.exists(ENCRYPTED_ENCRYPTED_DATA_FILE):
-        return []
-
-    try:
-        encrypted = open(ENCRYPTED_ENCRYPTED_DATA_FILE, "rb").read()
-        decrypted = _get_fernet().decrypt(encrypted)
-        raw = json.loads(decrypted.decode("utf-8"))
-
-        # Defensive normalization: discard anything outside the approved
-        # minimal schema, including legacy fields if an old record is present.
-        clean = []
-        for item in raw if isinstance(raw, list) else []:
-            if not isinstance(item, dict):
-                continue
-            roll_no = str(item.get("roll_no", "")).strip()
-            public_id = str(item.get("public_id", "")).strip()
-            if not roll_no or not public_id:
-                continue
-            try:
-                merit_total = round(float(item.get("merit_total", 0)), 2)
-                merit_max = round(float(item.get("merit_max", 0)), 2)
-            except (TypeError, ValueError):
-                continue
-            clean.append({
-                "roll_no": roll_no,
-                "public_id": public_id,
-                "merit_total": merit_total,
-                "merit_max": merit_max,
-                "published": bool(item.get("published", False)),
-            })
-
-        # Canonicalize the database:
-        # - exactly one record per roll number
-        # - exactly one anonymous ID per record
-        # - if duplicate roll numbers exist, keep the last stored record
-        # - if an anonymous ID is duplicated, assign a fresh ID to the later record
-        by_roll = {}
-        for item in clean:
-            by_roll[item["roll_no"]] = item
-
-        canonical = []
-        used_public_ids = set()
-        for item in by_roll.values():
-            public_id = item["public_id"]
-            if public_id in used_public_ids:
-                public_id = generate_unique_public_id(canonical)
-                item["public_id"] = public_id
-            used_public_ids.add(public_id)
-            canonical.append(item)
-
-        return canonical
-
-    except InvalidToken:
-        st.error(
-            "The encrypted database could not be opened with the configured key. "
-            "No data was loaded."
-        )
-        st.stop()
-    except Exception as exc:
-        st.error(
-            f"Secure database could not be read. No data was loaded. ({type(exc).__name__})"
-        )
-        st.stop()
-
-
-def save_data(db):
-    """Canonicalize and encrypt the minimal ranking database."""
-    canonical = {}
-    for item in db:
+def _normalize_database(raw):
+    """Keep exactly one maximum-score record per roll number."""
+    clean = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
         roll_no = str(item.get("roll_no", "")).strip()
         public_id = str(item.get("public_id", "")).strip()
         if not roll_no or not public_id:
             continue
-        canonical[roll_no] = {
+        try:
+            merit_total = round(float(item.get("merit_total", 0)), 2)
+            merit_max = round(float(item.get("merit_max", 0)), 2)
+        except (TypeError, ValueError):
+            continue
+        clean.append({
             "roll_no": roll_no,
             "public_id": public_id,
-            "merit_total": round(float(item.get("merit_total", 0)), 2),
-            "merit_max": round(float(item.get("merit_max", 0)), 2),
-            "published": bool(item.get("published", False)),
-        }
+            "merit_total": merit_total,
+            "merit_max": merit_max,
+            "published": True,
+        })
 
-    minimal = []
+    by_roll = {}
+    for item in clean:
+        old = by_roll.get(item["roll_no"])
+        if old is None or item["merit_total"] > old["merit_total"]:
+            if old is not None:
+                item["public_id"] = old["public_id"]
+            by_roll[item["roll_no"]] = item
+
+    canonical = []
     used_public_ids = set()
-    for item in canonical.values():
+    for item in by_roll.values():
         if item["public_id"] in used_public_ids:
-            item["public_id"] = generate_unique_public_id(minimal)
+            item["public_id"] = generate_unique_public_id(canonical)
         used_public_ids.add(item["public_id"])
-        minimal.append(item)
-
-    payload = json.dumps(
-        minimal,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    encrypted = _get_fernet().encrypt(payload)
-
-    # Atomic replacement reduces the chance of leaving a partially-written
-    # database if the process stops during a write.
-    tmp_file = ENCRYPTED_ENCRYPTED_DATA_FILE + ".tmp"
-    with open(tmp_file, "wb") as f:
-        f.write(encrypted)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp_file, ENCRYPTED_ENCRYPTED_DATA_FILE)
+        canonical.append(item)
+    return canonical
 
 
-def generate_unique_public_id(db):
-    """Generate a random anonymous numeric ID."""
-    used = {
-        str(item.get("public_id", "")).strip()
-        for item in db
-    }
+def load_data():
+    """Load encrypted data when a key exists, otherwise use local JSON."""
+    fernet = _get_fernet()
+    filename = ENCRYPTED_ENCRYPTED_DATA_FILE if fernet else PLAIN_RANKING_DATA_FILE
+    if not os.path.exists(filename):
+        return []
+    try:
+        if fernet:
+            with open(filename, "rb") as f:
+                encrypted = f.read()
+            raw = json.loads(fernet.decrypt(encrypted).decode("utf-8"))
+        else:
+            with open(filename, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        return _normalize_database(raw)
+    except Exception:
+        return []
 
-    while True:
-        candidate = f"{secrets.randbelow(1_000_000):06d}"
-        if candidate not in used:
-            return candidate
+
+def save_data(db):
+    """Save one maximum-score record per roll number."""
+    minimal = _normalize_database(db)
+    payload = json.dumps(minimal, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    fernet = _get_fernet()
+    if fernet:
+        tmp_file = ENCRYPTED_ENCRYPTED_DATA_FILE + ".tmp"
+        with open(tmp_file, "wb") as f:
+            f.write(fernet.encrypt(payload))
+        os.replace(tmp_file, ENCRYPTED_ENCRYPTED_DATA_FILE)
+    else:
+        tmp_file = PLAIN_RANKING_DATA_FILE + ".tmp"
+        with open(tmp_file, "wb") as f:
+            f.write(payload)
+        os.replace(tmp_file, PLAIN_RANKING_DATA_FILE)
 
 
 # ============================================================
@@ -829,8 +757,7 @@ def render_marksheet(record, total_candidates, paper_results=None, database_save
         st.metric("Current Rank", f"#{record.get('rank', 'N/A')}")
     else:
         st.info(
-            "Marks generated successfully. Secure ranking storage is not configured, "
-            "so no permanent rank/public record was saved."
+            "Marks generated successfully. The result is saved in the local ranking database."
         )
 
     if paper_results:
@@ -1887,103 +1814,51 @@ if st.button(
     # =================================================
     # SECURE DATABASE / MARKSHEET FALLBACK
     # =================================================
-    # A missing OMR_DATABASE_KEY must NOT prevent a candidate from seeing
-    # the marks calculated from their uploaded OMR sheets. In that case,
-    # the marksheet is generated for the current session only and no
-    # permanent ranking record is written.
+    # OMR_DATABASE_KEY is optional. Without it, the app uses the local JSON
+    # ranking database; with it, the database is encrypted.
 
     normalized_roll_no = str(roll_no).strip()
     database_saved = False
-    db = []
-    public_id = generate_unique_public_id([])
+    db = load_data()
 
-    if OMR_DATABASE_KEY and Fernet is not None:
-        try:
-            db = load_data()
-
-            existing = next(
-                (
-                    item for item in db
-                    if str(item.get("roll_no", "")).strip() == normalized_roll_no
-                ),
-                None
-            )
-
-            if existing:
-                # One roll number must always keep ONE fixed Anonymous ID.
-                public_id = str(
-                    existing.get("public_id") or generate_unique_public_id(db)
-                )
-
-                old_total = float(existing.get("merit_total", 0))
-                old_max = float(existing.get("merit_max", 0))
-
-                # IMPORTANT:
-                # If the same roll number checks/submits multiple times,
-                # retain the HIGHEST merit total ever recorded for that roll.
-                # A lower later submission must never reduce the candidate's
-                # stored marks or rank.
-                if merit_total > old_total:
-                    best_total = round(merit_total, 2)
-                    best_max = round(merit_max, 2)
-                else:
-                    best_total = round(old_total, 2)
-                    best_max = round(old_max, 2)
-
-                new_entry = {
-                    "roll_no": normalized_roll_no,
-                    "public_id": public_id,
-                    "merit_total": best_total,
-                    "merit_max": best_max,
-                    "published": True,
-                }
-            else:
-                # First result for this roll number.
-                public_id = generate_unique_public_id(db)
-                new_entry = {
-                    "roll_no": normalized_roll_no,
-                    "public_id": public_id,
-                    "merit_total": round(merit_total, 2),
-                    "merit_max": round(merit_max, 2),
-                    "published": True,
-                }
-
-            # Replace only this roll number's record, preserving exactly
-            # one record per candidate.
-            db = [
-                item for item in db
-                if str(item.get("roll_no", "")).strip() != normalized_roll_no
-            ]
-            db.append(new_entry)
-
-            db.sort(
-                key=lambda x: float(x.get("merit_total", 0)),
-                reverse=True
-            )
-
-            for rank_idx, record in enumerate(db, start=1):
-                record["rank"] = rank_idx
-
-            save_data(db)
-            database_saved = True
-
-        except Exception as exc:
-            # Never discard a successfully calculated marksheet just because
-            # encrypted ranking storage is unavailable.
-            database_saved = False
-            db = []
-            st.warning(
-                "⚠️ Marks were calculated successfully, but secure ranking "
-                "storage is unavailable. The marksheet is being shown for "
-                "this session only. Configure OMR_DATABASE_KEY to enable "
-                "permanent rank storage."
-            )
-
-    else:
-        st.warning(
-            "⚠️ Secure ranking storage is not configured. The marksheet will "
-            "still be generated, but the result will not be saved permanently."
+    try:
+        existing = next(
+            (item for item in db
+             if str(item.get("roll_no", "")).strip() == normalized_roll_no),
+            None,
         )
+
+        if existing:
+            public_id = str(existing.get("public_id") or generate_unique_public_id(db))
+            old_total = float(existing.get("merit_total", 0))
+            old_max = float(existing.get("merit_max", 0))
+            if merit_total > old_total:
+                best_total, best_max = round(merit_total, 2), round(merit_max, 2)
+            else:
+                best_total, best_max = round(old_total, 2), round(old_max, 2)
+        else:
+            public_id = generate_unique_public_id(db)
+            best_total, best_max = round(merit_total, 2), round(merit_max, 2)
+
+        new_entry = {
+            "roll_no": normalized_roll_no,
+            "public_id": public_id,
+            "merit_total": best_total,
+            "merit_max": best_max,
+            "published": True,
+        }
+
+        db = [item for item in db
+              if str(item.get("roll_no", "")).strip() != normalized_roll_no]
+        db.append(new_entry)
+        db.sort(key=lambda x: (-float(x.get("merit_total", 0)), str(x.get("roll_no", ""))))
+        for rank_idx, record in enumerate(db, start=1):
+            record["rank"] = rank_idx
+        save_data(db)
+        database_saved = True
+    except Exception:
+        database_saved = False
+        st.warning("⚠️ Marks were calculated, but the ranking database could not be updated. Please try again.")
 
     st.balloons()
 
@@ -2010,7 +1885,7 @@ if st.button(
 
     if database_saved:
         st.success(
-            "📌 Result saved securely. The merit rank list is updated automatically."
+            "📌 Result saved. The merit rank list is updated automatically."
         )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
@@ -2059,14 +1934,7 @@ with tabs[0]:
 
     if search_public_id.strip():
 
-        if not OMR_DATABASE_KEY or Fernet is None:
-            st.warning(
-                "Secure ranking storage is not configured. Rank Lookup is unavailable "
-                "until OMR_DATABASE_KEY is configured."
-            )
-            db = []
-        else:
-            db = load_data()
+        db = load_data()
 
         # Recalculate ranks from the current stored merit marks so the
         # displayed rank is always the current rank.
@@ -2112,64 +1980,51 @@ with tabs[1]:
         "Only Rank, Anonymous ID and Merit Marks are displayed publicly."
     )
 
-    if not OMR_DATABASE_KEY or Fernet is None:
-        st.warning(
-            "Secure ranking storage is not configured. Add OMR_DATABASE_KEY "
-            "to Streamlit Secrets so results can be stored between sessions."
+    if not OMR_DATABASE_KEY:
+        st.info(
+            "Automatic ranking is enabled without a password. Results are kept "
+            "in the app's local ranking database."
         )
-        all_db = []
+
+    all_db = load_data()
+
+    # Every stored result is public automatically. One roll number is one record.
+    for item in all_db:
+        item["published"] = True
+
+    if all_db:
+        all_db.sort(
+            key=lambda x: (
+                -float(x.get("merit_total", 0)),
+                str(x.get("roll_no", "")).strip(),
+            )
+        )
+        for rank_idx, item in enumerate(all_db, start=1):
+            item["rank"] = rank_idx
+        save_data(all_db)
+
+    if not all_db:
+        st.info("No merit records have been generated yet.")
     else:
-        all_db = load_data()
-
-        # All valid stored records are public automatically.
-        # Exactly one stored record represents exactly one roll number.
-        # Rank is ALWAYS calculated from that candidate's TOTAL MERIT MARKS
-        # across the complete merit papers, not from an individual paper.
+        rows = []
         for item in all_db:
-            item["published"] = True
+            total = float(item.get("merit_total", 0))
+            max_marks = float(item.get("merit_max", 0))
+            rows.append({
+                "Rank": int(item.get("rank", 0)),
+                "Anonymous ID": item.get("public_id", "N/A"),
+                "Merit Marks": f"{total:.2f} / {max_marks:.2f}",
+            })
 
-        if all_db:
-            all_db.sort(
-                key=lambda x: (
-                    -float(x.get("merit_total", 0)),
-                    str(x.get("roll_no", "")).strip(),
-                )
-            )
-
-            # Store the current rank on every candidate record.
-            # Equal merit totals receive consecutive ranks; the roll number
-            # is only a deterministic tie-break and is never displayed.
-            for rank_idx, item in enumerate(all_db, start=1):
-                item["rank"] = rank_idx
-
-            save_data(all_db)
-
-        if not all_db:
-            st.info("No merit records have been generated yet.")
-        else:
-            rows = []
-            for item in all_db:
-                total = float(item.get("merit_total", 0))
-                max_marks = float(item.get("merit_max", 0))
-
-                rows.append(
-                    {
-                        "Rank": int(item.get("rank", 0)),
-                        "Anonymous ID": item.get("public_id", "N/A"),
-                        "Merit Marks": f"{total:.2f} / {max_marks:.2f}",
-                    }
-                )
-
-            st.markdown("### 🏆 Live Merit Rank List")
-            st.dataframe(
-                pd.DataFrame(rows),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.caption(
-                "One Anonymous ID is permanently associated with one roll number. "
-                "If the same roll number is checked multiple times, only the "
-                "highest merit marks are retained for ranking. The roll number "
-                "itself is never displayed."
-            )
+        st.markdown("### 🏆 Live Merit Rank List")
+        st.dataframe(
+            pd.DataFrame(rows),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            "One Anonymous ID is permanently associated with one roll number. "
+            "If the same roll number is checked multiple times, only its "
+            "highest merit marks are retained for ranking. The roll number "
+            "itself is never displayed."
+        )
