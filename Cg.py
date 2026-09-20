@@ -650,6 +650,30 @@ def _get_fernet():
         return None
 
 
+def generate_unique_public_id(existing_records=None):
+    """Generate a unique anonymous ID.
+
+    The ID is deliberately independent of the roll number so the roll number
+    cannot be recovered from the public ID. Once assigned to a roll number,
+    the ID is preserved by the database normalization/update logic.
+    """
+    existing_records = existing_records or []
+    used = {
+        str(item.get("public_id", "")).strip()
+        for item in existing_records
+        if isinstance(item, dict)
+    }
+
+    # Random, non-reversible public identifier.
+    for _ in range(100):
+        candidate = f"BPSC-{secrets.token_hex(5).upper()}"
+        if candidate not in used:
+            return candidate
+
+    # Extremely unlikely fallback.
+    return f"BPSC-{hashlib.sha256(secrets.token_bytes(32)).hexdigest()[:10].upper()}"
+
+
 def _normalize_database(raw):
     """Keep exactly one maximum-score record per roll number."""
     clean = []
