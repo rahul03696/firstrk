@@ -780,7 +780,6 @@ def render_marksheet(record, total_candidates, paper_results=None, database_save
     st.markdown(
         """
         <div class="secure-card">
-            <div class="secure-badge">🔒 PRIVATE RESULT VIEW</div>
             <div class="result-label">BPSC-AE OMR MARKSHEET</div>
         </div>
         """,
@@ -863,14 +862,6 @@ def render_marksheet(record, total_candidates, paper_results=None, database_save
         c2.metric("Merit %", f"{merit_pct:.2f}%")
         c3.metric("Overall Qualification", "QUALIFIED" if qualified else "NOT QUALIFIED")
 
-        st.caption(
-            "The detailed marks above are generated from the OMR sheets in this session. "
-            "The roll number is not displayed."
-        )
-    else:
-        st.caption(
-            "Only the anonymous result identifier and current rank are displayed."
-        )
 
 
 # ============================================================
@@ -1402,7 +1393,6 @@ st.markdown(
                 <div class="brand-subtitle">OMR Marks & Merit Ranking Portal</div>
             </div>
         </div>
-        <div class="header-badge">🔒 Secure processing</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1585,7 +1575,7 @@ if st.button(
                 pass
 
     if oversized:
-        st.error("Upload rejected because one or more files exceed the privacy/safety size limit.")
+        st.error("Upload rejected because one or more files exceed the size limit.")
         st.write("\n".join(f"- {item}" for item in oversized))
         st.stop()
 
@@ -2042,10 +2032,6 @@ if st.button(
 
 st.markdown(
     """
-    <div class="privacy-strip">
-        <div class="privacy-box"><h4>🔒 Privacy & Security</h4><p>Uploaded OMR files are processed for evaluation and are not stored in the ranking database.</p></div>
-        <div class="privacy-box"><h4>🏆 Your Rank</h4><p>Use Rank Lookup below with your Anonymous ID to see only your own rank. The full merit list is not published.</p></div>
-    </div>
     <div class="portal-note">BPSC-AE Rank List Portal • OMR marks processing and merit ranking</div>
     """,
     unsafe_allow_html=True,
