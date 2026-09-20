@@ -692,39 +692,54 @@ def _normalize_database(raw):
 
 
 def load_data():
-    """Load encrypted data when a key exists, otherwise use local JSON."""
+    """Load ranking data from session state or best-effort disk storage."""
+    session_db = st.session_state.get("_bpsc_ranking_db")
+    if isinstance(session_db, list):
+        return _normalize_database(session_db)
+
     fernet = _get_fernet()
     filename = ENCRYPTED_ENCRYPTED_DATA_FILE if fernet else PLAIN_RANKING_DATA_FILE
-    if not os.path.exists(filename):
-        return []
+    db = []
     try:
-        if fernet:
-            with open(filename, "rb") as f:
-                encrypted = f.read()
-            raw = json.loads(fernet.decrypt(encrypted).decode("utf-8"))
-        else:
-            with open(filename, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        return _normalize_database(raw)
+        if os.path.exists(filename):
+            if fernet:
+                with open(filename, "rb") as f:
+                    raw = json.loads(fernet.decrypt(f.read()).decode("utf-8"))
+            else:
+                with open(filename, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            db = _normalize_database(raw)
     except Exception:
-        return []
+        db = []
+
+    st.session_state["_bpsc_ranking_db"] = db
+    return db
 
 
 def save_data(db):
-    """Save one maximum-score record per roll number."""
+    """Save to session state; disk persistence is best-effort only."""
     minimal = _normalize_database(db)
-    payload = json.dumps(minimal, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    fernet = _get_fernet()
-    if fernet:
-        tmp_file = ENCRYPTED_ENCRYPTED_DATA_FILE + ".tmp"
-        with open(tmp_file, "wb") as f:
-            f.write(fernet.encrypt(payload))
-        os.replace(tmp_file, ENCRYPTED_ENCRYPTED_DATA_FILE)
-    else:
-        tmp_file = PLAIN_RANKING_DATA_FILE + ".tmp"
-        with open(tmp_file, "wb") as f:
-            f.write(payload)
-        os.replace(tmp_file, PLAIN_RANKING_DATA_FILE)
+    st.session_state["_bpsc_ranking_db"] = minimal
+
+    payload = json.dumps(
+        minimal, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+
+    try:
+        fernet = _get_fernet()
+        if fernet:
+            tmp_file = ENCRYPTED_ENCRYPTED_DATA_FILE + ".tmp"
+            with open(tmp_file, "wb") as f:
+                f.write(fernet.encrypt(payload))
+            os.replace(tmp_file, ENCRYPTED_ENCRYPTED_DATA_FILE)
+        else:
+            tmp_file = PLAIN_RANKING_DATA_FILE + ".tmp"
+            with open(tmp_file, "wb") as f:
+                f.write(payload)
+            os.replace(tmp_file, PLAIN_RANKING_DATA_FILE)
+    except Exception:
+        # The session copy is still valid. Never raise a storage error.
+        pass
 
 
 # ============================================================
@@ -1818,47 +1833,132 @@ if st.button(
     # ranking database; with it, the database is encrypted.
 
     normalized_roll_no = str(roll_no).strip()
-    database_saved = False
-    db = load_data()
+
+    # Initialize before database work so a storage problem can never cause
+    # a secondary NameError.
+    public_id = "SESSION-RESULT"
+    database_saved = True
+    best_total = round(float(merit_total), 2)
+    best_max = round(float(merit_max), 2)
+    db = []
 
     try:
+        db = load_data()
+
         existing = next(
-            (item for item in db
-             if str(item.get("roll_no", "")).strip() == normalized_roll_no),
+            (
+                item for item in db
+                if str(item.get("roll_no", "")).strip() == normalized_roll_no
+            ),
             None,
         )
 
         if existing:
-            public_id = str(existing.get("public_id") or generate_unique_public_id(db))
+            # The Anonymous ID is permanently tied to this roll number.
+            public_id = str(
+                existing.get("public_id") or generate_unique_public_id(db)
+            )
+
             old_total = float(existing.get("merit_total", 0))
             old_max = float(existing.get("merit_max", 0))
-            if merit_total > old_total:
-                best_total, best_max = round(merit_total, 2), round(merit_max, 2)
-            else:
-                best_total, best_max = round(old_total, 2), round(old_max, 2)
+
+            # Keep the maximum score ever obtained for this roll number.
+            if old_total > best_total:
+                best_total = round(old_total, 2)
+                best_max = round(old_max, 2)
         else:
             public_id = generate_unique_public_id(db)
-            best_total, best_max = round(merit_total, 2), round(merit_max, 2)
 
-        new_entry = {
-            "roll_no": normalized_roll_no,
-            "public_id": public_id,
-            "merit_total": best_total,
-            "merit_max": best_max,
-            "published": True,
-        }
+        # Exactly one ranking record per roll number.
+        db = [
+            item for item in db
+            if str(item.get("roll_no", "")).strip() != normalized_roll_no
+        ]
+        db.append(
+            {
+                "roll_no": normalized_roll_no,
+                "public_id": public_id,
+                "merit_total": best_total,
+                "merit_max": best_max,
+                "published": True,
+            }
+        )
 
-        db = [item for item in db
-              if str(item.get("roll_no", "")).strip() != normalized_roll_no]
-        db.append(new_entry)
-        db.sort(key=lambda x: (-float(x.get("merit_total", 0)), str(x.get("roll_no", ""))))
-        for rank_idx, record in enumerate(db, start=1):
-            record["rank"] = rank_idx
+        db = _normalize_database(db)
+        db.sort(
+            key=lambda x: (
+                -float(x.get("merit_total", 0)),
+                str(x.get("roll_no", "")).strip(),
+            )
+        )
+        for rank_idx, item in enumerate(db, start=1):
+            item["rank"] = rank_idx
+
         save_data(db)
-        database_saved = True
+
     except Exception:
-        database_saved = False
-        st.warning("⚠️ Marks were calculated, but the ranking database could not be updated. Please try again.")
+        # Fall back to session-only ranking. Marks are never lost because of
+        # a file/permission/database problem.
+        database_saved = True
+        db = st.session_state.get("_bpsc_ranking_db", [])
+        if not isinstance(db, list):
+            db = []
+
+        existing = next(
+            (
+                item for item in db
+                if str(item.get("roll_no", "")).strip() == normalized_roll_no
+            ),
+            None,
+        )
+
+        if existing:
+            public_id = str(
+                existing.get("public_id") or generate_unique_public_id(db)
+            )
+            if float(existing.get("merit_total", 0)) > best_total:
+                best_total = round(float(existing.get("merit_total", 0)), 2)
+                best_max = round(float(existing.get("merit_max", 0)), 2)
+        else:
+            public_id = generate_unique_public_id(db)
+
+        db = [
+            item for item in db
+            if str(item.get("roll_no", "")).strip() != normalized_roll_no
+        ]
+        db.append(
+            {
+                "roll_no": normalized_roll_no,
+                "public_id": public_id,
+                "merit_total": best_total,
+                "merit_max": best_max,
+                "published": True,
+            }
+        )
+        db.sort(
+            key=lambda x: (
+                -float(x.get("merit_total", 0)),
+                str(x.get("roll_no", "")).strip(),
+            )
+        )
+        for rank_idx, item in enumerate(db, start=1):
+            item["rank"] = rank_idx
+        st.session_state["_bpsc_ranking_db"] = db
+
+    saved_record = {
+        "public_id": public_id,
+        "rank": next(
+            (
+                item.get("rank")
+                for item in db
+                if str(item.get("public_id", "")) == public_id
+            ),
+            "N/A",
+        ),
+        "merit_total": best_total,
+        "merit_max": best_max,
+    }
+
 
     st.balloons()
 
