@@ -58,6 +58,15 @@ if not OMR_DATABASE_KEY:
     except Exception:
         OMR_DATABASE_KEY = ""
 
+# Optional administrator password for publishing/unpublishing the public merit list.
+# Keep this as a Streamlit secret/environment variable; never hard-code it in source.
+ADMIN_PUBLISH_PASSWORD = os.environ.get("ADMIN_PUBLISH_PASSWORD", "")
+if not ADMIN_PUBLISH_PASSWORD:
+    try:
+        ADMIN_PUBLISH_PASSWORD = st.secrets.get("ADMIN_PUBLISH_PASSWORD", "")
+    except Exception:
+        ADMIN_PUBLISH_PASSWORD = ""
+
 MAX_UPLOAD_MB = 15
 
 OPTION_MAP = {
@@ -700,6 +709,7 @@ def load_data():
                 "public_id": public_id,
                 "merit_total": merit_total,
                 "merit_max": merit_max,
+                "published": bool(item.get("published", False)),
             })
         return clean
 
@@ -725,6 +735,7 @@ def save_data(db):
             "public_id": str(item.get("public_id", "")).strip(),
             "merit_total": round(float(item.get("merit_total", 0)), 2),
             "merit_max": round(float(item.get("merit_max", 0)), 2),
+            "published": bool(item.get("published", False)),
         })
 
     payload = json.dumps(
@@ -1883,6 +1894,7 @@ if st.button(
                 "public_id": public_id,
                 "merit_total": round(merit_total, 2),
                 "merit_max": round(merit_max, 2),
+                "published": False,
             }
 
             db = [
@@ -1942,6 +1954,13 @@ if st.button(
         paper_results=paper_results,
         database_saved=database_saved,
     )
+
+    if database_saved:
+        st.info(
+            "📌 This result is saved securely but is NOT public yet. "
+            "An administrator must publish the merit list from the "
+            "🏆 Merit Rank List tab."
+        )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
     # Streamlit session after the result has been rendered.
@@ -2029,59 +2048,150 @@ with tabs[0]:
             )
 
 # ============================================================
+# ============================================================
 # TAB 3
 # ============================================================
 
 with tabs[1]:
 
-    st.subheader(
-        "🏆 Live Merit Rank List"
-    )
+    st.subheader("🏆 Merit Rank List")
     st.caption(
-        "Public view contains only Rank, Anonymous ID and Merit Marks. "
-        "No roll numbers or OMR details are published."
+        "Only records explicitly published by the administrator are shown. "
+        "Roll numbers and OMR details are never displayed."
     )
 
     if not OMR_DATABASE_KEY or Fernet is None:
         st.info(
-            "Secure ranking storage is not configured. The public merit list "
-            "will appear after the administrator configures OMR_DATABASE_KEY."
+            "Secure ranking storage is not configured. Configure "
+            "OMR_DATABASE_KEY before publishing the merit list."
         )
         all_db = []
     else:
         all_db = load_data()
 
-    if not all_db:
-        st.info(
-            "No merit records have been published yet."
-        )
-    else:
-        # Current rank is always calculated from current merit marks.
-        all_db.sort(
-            key=lambda x: float(x.get("merit_total", 0)),
-            reverse=True
+        # --------------------------------------------------------
+        # ADMIN PUBLICATION CONTROL
+        # --------------------------------------------------------
+        st.markdown("### 🔐 Administrator Publication")
+        st.write(
+            "Newly generated results remain private until the administrator "
+            "publishes them."
         )
 
-        for rank_idx, item in enumerate(all_db, start=1):
-            item["rank"] = rank_idx
+        admin_password = st.text_input(
+            "Administrator password",
+            type="password",
+            key="admin_publish_password",
+            help="Set ADMIN_PUBLISH_PASSWORD in Streamlit Secrets.",
+        )
 
-        save_data(all_db)
+        admin_configured = bool(ADMIN_PUBLISH_PASSWORD)
 
-        rows = [
-            {
-                "Rank": item.get("rank", "N/A"),
-                "Anonymous ID": item.get("public_id", "N/A"),
-                "Merit Marks": (
-                    f"{item.get('merit_total', 0)} / "
-                    f"{item.get('merit_max', 0)}"
-                ),
-            }
-            for item in all_db
+        if not admin_configured:
+            st.warning(
+                "ADMIN_PUBLISH_PASSWORD is not configured. Add it to "
+                "Streamlit Secrets before using the Publish button."
+            )
+
+        admin_authenticated = (
+            admin_configured
+            and bool(admin_password)
+            and admin_password == ADMIN_PUBLISH_PASSWORD
+        )
+
+        unpublished_count = sum(
+            1 for item in all_db if not bool(item.get("published", False))
+        )
+        published_count = sum(
+            1 for item in all_db if bool(item.get("published", False))
+        )
+
+        c1, c2 = st.columns(2)
+        c1.metric("Published records", published_count)
+        c2.metric("Waiting for publication", unpublished_count)
+
+        if admin_authenticated:
+            b1, b2 = st.columns(2)
+
+            with b1:
+                if st.button(
+                    "📢 Publish Merit List",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=(not all_db),
+                ):
+                    for item in all_db:
+                        item["published"] = True
+
+                    all_db.sort(
+                        key=lambda x: float(x.get("merit_total", 0)),
+                        reverse=True,
+                    )
+                    save_data(all_db)
+                    st.success(
+                        "✅ Merit list published successfully. "
+                        "Published records are now visible below."
+                    )
+                    st.rerun()
+
+            with b2:
+                if st.button(
+                    "🔒 Unpublish All",
+                    use_container_width=True,
+                    disabled=(not all_db),
+                ):
+                    for item in all_db:
+                        item["published"] = False
+
+                    save_data(all_db)
+                    st.success(
+                        "🔒 Merit list unpublished. No records are currently public."
+                    )
+                    st.rerun()
+
+        elif admin_password:
+            st.error("Incorrect administrator password.")
+
+        st.divider()
+
+        # --------------------------------------------------------
+        # PUBLIC MERIT LIST
+        # --------------------------------------------------------
+        public_db = [
+            item for item in all_db
+            if bool(item.get("published", False))
         ]
 
-        st.dataframe(
-            pd.DataFrame(rows),
-            hide_index=True,
-            use_container_width=True
-        )
+        if not public_db:
+            st.info("No merit records have been published yet.")
+        else:
+            public_db.sort(
+                key=lambda x: float(x.get("merit_total", 0)),
+                reverse=True,
+            )
 
+            rows = []
+            for rank_idx, item in enumerate(public_db, start=1):
+                total = float(item.get("merit_total", 0))
+                max_marks = float(item.get("merit_max", 0))
+                percentage = (total / max_marks * 100) if max_marks else 0.0
+                rows.append(
+                    {
+                        "Rank": rank_idx,
+                        "Anonymous ID": item.get("public_id", "N/A"),
+                        "Merit Marks": f"{total:.2f} / {max_marks:.2f}",
+                        "Percentage": f"{percentage:.2f}%",
+                    }
+                )
+
+            st.markdown("### 🏆 Live Published Merit List")
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "The public list contains only Rank, Anonymous ID, Merit Marks "
+                "and Percentage. Roll numbers and OMR details remain private."
+            )
