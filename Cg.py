@@ -838,16 +838,126 @@ st.markdown(
         border-radius: 8px;
         background: rgba(128,128,128,.08);
     }
+    .privacy-hero {
+        border: 1px solid rgba(49, 51, 63, .16);
+        border-radius: 22px;
+        padding: 28px 28px 24px 28px;
+        margin: 10px 0 20px 0;
+        background: linear-gradient(135deg, rgba(245,248,255,.95), rgba(250,250,252,.95));
+        text-align: center;
+    }
+    .privacy-lock {
+        font-size: 2.4rem;
+        margin-bottom: 4px;
+    }
+    .privacy-hero h2 {
+        margin: 0;
+        font-size: 1.8rem;
+    }
+    .privacy-lead {
+        max-width: 760px;
+        margin: 10px auto 0 auto;
+        font-size: 1rem;
+        line-height: 1.6;
+        opacity: .82;
+    }
+    .privacy-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 18px;
+    }
+    .privacy-box {
+        border: 1px solid rgba(49, 51, 63, .14);
+        border-radius: 16px;
+        padding: 18px;
+        background: rgba(250,250,252,.7);
+    }
+    .privacy-box h4 {
+        margin: 4px 0 7px 0;
+    }
+    .privacy-box p {
+        margin: 0;
+        line-height: 1.55;
+        opacity: .78;
+        font-size: .92rem;
+    }
+    .privacy-icon {
+        font-size: 1.55rem;
+    }
+    @media (max-width: 700px) {
+        .privacy-grid {grid-template-columns: 1fr;}
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="privacy-note">🔒 <b>Privacy-first processing:</b> '
-    'OMR files are processed in memory and are not written to the ranking database. '
-    'The persistent database is encrypted and contains only the minimum fields '
-    'needed for ranking.</div>',
+    """
+    <div class="privacy-hero">
+        <div class="privacy-lock">🔒</div>
+        <h2>Private &amp; Secure Merit Rank Portal</h2>
+        <p class="privacy-lead">
+            Your OMR information is used only to calculate your merit result.
+            We do not publish your OMR responses or question-wise analysis.
+        </p>
+    </div>
+    """,
     unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="privacy-grid">
+        <div class="privacy-box">
+            <div class="privacy-icon">🛡️</div>
+            <h4>No public OMR storage</h4>
+            <p>
+                Your uploaded OMR sheet is not published or displayed as a
+                public record. The ranking database stores only the minimum
+                information required for the merit list.
+            </p>
+        </div>
+        <div class="privacy-box">
+            <div class="privacy-icon">👁️</div>
+            <h4>Your detailed data is private</h4>
+            <p>
+                Your OMR responses, right/wrong question analysis, answer key,
+                and detailed scorecard are not shown to students or published.
+            </p>
+        </div>
+        <div class="privacy-box">
+            <div class="privacy-icon">🏆</div>
+            <h4>Only merit ranking is published</h4>
+            <p>
+                The public result contains only your Anonymous ID, Merit Marks,
+                and Rank. Your personal identity is not displayed in the rank list.
+            </p>
+        </div>
+        <div class="privacy-box">
+            <div class="privacy-icon">🔐</div>
+            <h4>Minimal protected record</h4>
+            <p>
+                Only the information necessary to maintain the current merit
+                ranking is retained in the protected ranking database.
+            </p>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.info(
+    "📌 **What you will receive:** After your OMR is processed, the portal "
+    "will show only your **Anonymous ID and current Rank**. The public merit "
+    "list will show only **Rank, Anonymous ID, and Merit Marks**. "
+    "No right/wrong question analysis will be provided."
+)
+
+st.warning(
+    "🔒 **Privacy promise:** Your OMR responses and detailed evaluation are "
+    "not published through this portal. The system is designed to minimize "
+    "stored information and protect the ranking data."
 )
 
 
@@ -895,6 +1005,12 @@ with tabs[0]:
     )
 
     st.divider()
+
+    st.success(
+        "🔐 **Purpose of upload:** Your OMR is submitted only for merit "
+        "calculation. The portal does **not** provide right/wrong question "
+        "analysis or a detailed answer-by-answer marksheet after submission."
+    )
 
     # The upload section is always enabled; identity comes only from OMR.
     # All candidate identity data is obtained from the uploaded sheets.
