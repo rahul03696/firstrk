@@ -765,29 +765,93 @@ def generate_unique_public_id(db):
 # MARKSHEET DISPLAY
 # ============================================================
 
-def render_marksheet(record, total_candidates):
-    """Privacy-minimal student result: Anonymous ID + current rank only."""
+def render_marksheet(record, total_candidates, paper_results=None, database_saved=True):
+    """Render the candidate marksheet.
+
+    The marksheet is generated from the current session's OMR evaluation.
+    If secure database storage is unavailable, the result is still displayed
+    locally in the current session, but no rank/public record is saved.
+    """
     st.markdown(
         """
         <div class="secure-card">
             <div class="secure-badge">🔒 PRIVATE RESULT VIEW</div>
-            <div class="result-label">Anonymous ID</div>
+            <div class="result-label">BPSC-AE OMR MARKSHEET</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
     st.markdown(
-        f"<div class='anon-id'>{record.get('public_id', 'N/A')}</div>",
+        f"<div class='anon-id'>{record.get('public_id', 'SESSION RESULT')}</div>",
         unsafe_allow_html=True,
     )
-    st.metric(
-        "Current Rank",
-        f"#{record.get('rank', 'N/A')}",
-    )
-    st.caption(
-        "Only your current rank is displayed. Marks, OMR responses, "
-        "answer keys and question-level details are not displayed."
-    )
+
+    if database_saved:
+        st.metric("Current Rank", f"#{record.get('rank', 'N/A')}")
+    else:
+        st.info(
+            "Marks generated successfully. Secure ranking storage is not configured, "
+            "so no permanent rank/public record was saved."
+        )
+
+    if paper_results:
+        rows = []
+        for code, meta in SUBJECT_META.items():
+            result = paper_results.get(code, {})
+            rows.append(
+                {
+                    "Paper": code,
+                    "Subject": meta["name"],
+                    "Booklet": result.get("set_name", "N/A"),
+                    "Correct": result.get("correct", 0),
+                    "Wrong": result.get("wrong", 0),
+                    "Unattempted": result.get("skipped", 0),
+                    "Deleted/Bonus": result.get("deleted_count", 0),
+                    "Marks": result.get("score", 0),
+                    "Max Marks": result.get("max_marks", 0),
+                    "Percentage": f"{result.get('pct', 0):.2f}%",
+                    "Status": "PASS" if result.get("passed", True) else "NOT QUALIFIED",
+                }
+            )
+
+        st.subheader("Paper-wise Result")
+        st.dataframe(
+            pd.DataFrame(rows),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        merit_total = sum(
+            float(paper_results.get(code, {}).get("score", 0))
+            for code, meta in SUBJECT_META.items()
+            if meta.get("type") != "qualifying"
+        )
+        merit_max = sum(
+            float(paper_results.get(code, {}).get("max_marks", 0))
+            for code, meta in SUBJECT_META.items()
+            if meta.get("type") != "qualifying"
+        )
+        merit_pct = round((merit_total / merit_max) * 100, 2) if merit_max else 0.0
+        qualified = all(
+            paper_results.get(code, {}).get("passed", False)
+            for code, meta in SUBJECT_META.items()
+            if meta.get("type") == "qualifying"
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Merit Marks", f"{merit_total:.2f} / {merit_max:.2f}")
+        c2.metric("Merit %", f"{merit_pct:.2f}%")
+        c3.metric("Overall Qualification", "QUALIFIED" if qualified else "NOT QUALIFIED")
+
+        st.caption(
+            "The detailed marks above are generated from the OMR sheets in this session. "
+            "The roll number is not displayed."
+        )
+    else:
+        st.caption(
+            "Only the anonymous result identifier and current rank are displayed."
+        )
 
 
 # ============================================================
@@ -1782,65 +1846,101 @@ if st.button(
     # English/Hindi marks, correct/wrong counts, and other paper details
     # are NOT stored in the database.
 
-    db = load_data()
+    # =================================================
+    # SECURE DATABASE / MARKSHEET FALLBACK
+    # =================================================
+    # A missing OMR_DATABASE_KEY must NOT prevent a candidate from seeing
+    # the marks calculated from their uploaded OMR sheets. In that case,
+    # the marksheet is generated for the current session only and no
+    # permanent ranking record is written.
 
     normalized_roll_no = str(roll_no).strip()
+    database_saved = False
+    db = []
+    public_id = generate_unique_public_id([])
 
-    # If this roll number already exists, update that record instead of
-    # creating another historical record. Keep the existing Anonymous ID.
-    existing = next(
-        (
-            item for item in db
-            if str(item.get("roll_no", "")).strip() == normalized_roll_no
-        ),
-        None
-    )
+    if OMR_DATABASE_KEY and Fernet is not None:
+        try:
+            db = load_data()
 
-    if existing:
-        public_id = str(
-            existing.get("public_id") or generate_unique_public_id(db)
-        )
+            existing = next(
+                (
+                    item for item in db
+                    if str(item.get("roll_no", "")).strip() == normalized_roll_no
+                ),
+                None
+            )
+
+            if existing:
+                public_id = str(
+                    existing.get("public_id") or generate_unique_public_id(db)
+                )
+            else:
+                public_id = generate_unique_public_id(db)
+
+            new_entry = {
+                "roll_no": normalized_roll_no,
+                "public_id": public_id,
+                "merit_total": round(merit_total, 2),
+                "merit_max": round(merit_max, 2),
+            }
+
+            db = [
+                item for item in db
+                if str(item.get("roll_no", "")).strip() != normalized_roll_no
+            ]
+            db.append(new_entry)
+
+            db.sort(
+                key=lambda x: float(x.get("merit_total", 0)),
+                reverse=True
+            )
+
+            for rank_idx, record in enumerate(db, start=1):
+                record["rank"] = rank_idx
+
+            save_data(db)
+            database_saved = True
+
+        except Exception as exc:
+            # Never discard a successfully calculated marksheet just because
+            # encrypted ranking storage is unavailable.
+            database_saved = False
+            db = []
+            st.warning(
+                "⚠️ Marks were calculated successfully, but secure ranking "
+                "storage is unavailable. The marksheet is being shown for "
+                "this session only. Configure OMR_DATABASE_KEY to enable "
+                "permanent rank storage."
+            )
+
     else:
-        public_id = generate_unique_public_id(db)
+        st.warning(
+            "⚠️ Secure ranking storage is not configured. The marksheet will "
+            "still be generated, but the result will not be saved permanently."
+        )
 
-    new_entry = {
-        "roll_no": normalized_roll_no,
+    st.balloons()
+
+    saved_record = {
         "public_id": public_id,
+        "rank": next(
+            (
+                item.get("rank")
+                for item in db
+                if str(item.get("public_id", "")) == public_id
+            ),
+            "N/A"
+        ),
         "merit_total": round(merit_total, 2),
         "merit_max": round(merit_max, 2),
     }
 
-    # Remove any old record for this roll number, then save only the
-    # current result.
-    db = [
-        item for item in db
-        if str(item.get("roll_no", "")).strip() != normalized_roll_no
-    ]
-    db.append(new_entry)
-
-    # Current merit ranking: highest merit marks = rank 1.
-    # Recalculate every rank after each new/update submission.
-    db.sort(
-        key=lambda x: float(x.get("merit_total", 0)),
-        reverse=True
-    )
-
-    for rank_idx, record in enumerate(db, start=1):
-        record["rank"] = rank_idx
-
-    # save_data() strips the transient rank and any unexpected fields.
-    save_data(db)
-
-    st.balloons()
-
-    saved_record = next(
-        item for item in db
-        if str(item.get("public_id", "")) == public_id
-    )
-
     render_marksheet(
         saved_record,
-        len(db)
+        len(db),
+        paper_results=paper_results,
+        database_saved=database_saved,
     )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
@@ -1889,19 +1989,27 @@ with tabs[0]:
 
     if search_public_id.strip():
 
-        db = load_data()
+        if not OMR_DATABASE_KEY or Fernet is None:
+            st.warning(
+                "Secure ranking storage is not configured. Rank Lookup is unavailable "
+                "until OMR_DATABASE_KEY is configured."
+            )
+            db = []
+        else:
+            db = load_data()
 
         # Recalculate ranks from the current stored merit marks so the
         # displayed rank is always the current rank.
-        db.sort(
-            key=lambda x: float(x.get("merit_total", 0)),
-            reverse=True
-        )
+        if db:
+            db.sort(
+                key=lambda x: float(x.get("merit_total", 0)),
+                reverse=True
+            )
 
-        for rank_idx, item in enumerate(db, start=1):
-            item["rank"] = rank_idx
+            for rank_idx, item in enumerate(db, start=1):
+                item["rank"] = rank_idx
 
-        save_data(db)
+            save_data(db)
 
         record = next(
             (
@@ -1934,7 +2042,14 @@ with tabs[1]:
         "No roll numbers or OMR details are published."
     )
 
-    all_db = load_data()
+    if not OMR_DATABASE_KEY or Fernet is None:
+        st.info(
+            "Secure ranking storage is not configured. The public merit list "
+            "will appear after the administrator configures OMR_DATABASE_KEY."
+        )
+        all_db = []
+    else:
+        all_db = load_data()
 
     if not all_db:
         st.info(
