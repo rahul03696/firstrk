@@ -1466,8 +1466,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.info("💡 Your roll number is read from the OMR automatically — you do not need to type it.")
-
 # The upload section is always enabled; identity comes only from OMR.
 # All candidate identity data is obtained from the uploaded sheets.
 
@@ -1522,11 +1520,6 @@ for row_start in range(0, len(subjects), 3):
 uploaded_count = sum(1 for item in omr_files.values() if item is not None)
 confirmed_count = sum(1 for item in booklet_confirmed.values() if item)
 
-if uploaded_count == 6 and confirmed_count == 6:
-    st.success("✅ 6/6 OMR sheets uploaded • 6/6 booklet series confirmed — ready to generate.")
-else:
-    st.info(f"📋 OMR sheets: **{uploaded_count}/6**  ·  Booklet confirmations: **{confirmed_count}/6**")
-
 st.divider()
 
 
@@ -1541,8 +1534,7 @@ if st.button(
     type="primary"
 ):
 
-    progress = st.progress(0, text="Starting OMR verification…")
-    status_box = st.empty()
+    progress = st.progress(0)
 
     # =================================================
     # HARD GATE: EXACTLY SIX REQUIRED OMR SHEETS
@@ -1608,12 +1600,7 @@ if st.button(
         for code, identity in identity_results.items()
     }
 
-    # Do not display the detected roll number back to the browser/UI.
-    # Only show a privacy-safe verification status.
-    st.success(
-        "🔐 Identity verification completed across all six OMR sheets. "
-        "The detected roll number is not displayed."
-    )
+    # The detected roll number is never displayed back to the browser/UI.
 
     roll_values = list(normalized_rolls.values())
     all_rolls_present = all(bool(value) for value in roll_values)
@@ -1691,11 +1678,7 @@ if st.button(
 
     for paper_index, (code, meta) in enumerate(SUBJECT_META.items(), start=1):
 
-        status_box.info(f"⚙️ Processing {paper_index}/{total_papers}: {meta['name']}…")
-        progress.progress(
-            (paper_index - 1) / total_papers,
-            text=f"Processing {code} — {meta['name']}"
-        )
+        progress.progress((paper_index - 1) / total_papers)
 
         selected_set = (
             omr_sets[code]
@@ -1799,13 +1782,10 @@ if st.button(
             eval_res
         )
 
-        progress.progress(
-            paper_index / total_papers,
-            text=f"Completed {paper_index}/{total_papers}: {meta['name']}"
-        )
+        progress.progress(paper_index / total_papers)
 
 
-    status_box.success("✅ All OMR sheets processed. Generating your marksheet…")
+    progress.empty()
 
     # =================================================
     # OVERALL QUALIFICATION
@@ -2011,12 +1991,6 @@ if st.button(
         paper_results=paper_results,
         database_saved=database_saved,
     )
-
-    if database_saved:
-        st.success(
-            "📌 Result saved. Note your Anonymous ID — you can use it in "
-            "Rank Lookup below to check your current rank later."
-        )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
     # Streamlit session after the result has been rendered.
