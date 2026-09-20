@@ -2009,7 +2009,8 @@ if st.button(
 
     if database_saved:
         st.success(
-            "📌 Result saved. The merit rank list is updated automatically."
+            "📌 Result saved. Note your Anonymous ID — you can use it in "
+            "Rank Lookup below to check your current rank later."
         )
 
     # Best-effort cleanup of transient OMR/evaluation objects from this
@@ -2028,7 +2029,7 @@ st.markdown(
     """
     <div class="privacy-strip">
         <div class="privacy-box"><h4>🔒 Privacy & Security</h4><p>Uploaded OMR files are processed for evaluation and are not stored in the ranking database.</p></div>
-        <div class="privacy-box"><h4>🏆 BPSC-AE Merit List</h4><p>Use Rank Lookup or Merit Rank List below to view published ranking information.</p></div>
+        <div class="privacy-box"><h4>🏆 Your Rank</h4><p>Use Rank Lookup below with your Anonymous ID to see only your own rank. The full merit list is not published.</p></div>
     </div>
     <div class="portal-note">BPSC-AE Rank List Portal • OMR marks processing and merit ranking</div>
     """,
@@ -2038,12 +2039,9 @@ st.markdown(
 # ============================================================
 # OTHER PORTAL TABS
 # ============================================================
-tabs = st.tabs([
-    "🔍 Rank Lookup",
-    "🏆 Merit Rank List"
-])
+rank_lookup_section = st.container()
 
-with tabs[0]:
+with rank_lookup_section:
 
 
     st.subheader(
@@ -2064,8 +2062,10 @@ with tabs[0]:
         # displayed rank is always the current rank.
         if db:
             db.sort(
-                key=lambda x: float(x.get("merit_total", 0)),
-                reverse=True
+                key=lambda x: (
+                    -float(x.get("merit_total", 0)),
+                    str(x.get("roll_no", "")).strip(),
+                )
             )
 
             for rank_idx, item in enumerate(db, start=1):
@@ -2089,66 +2089,3 @@ with tabs[0]:
             st.error(
                 f"No record found for Anonymous ID: `{search_public_id}`"
             )
-
-# ============================================================
-# ============================================================
-# ============================================================
-# TAB 3
-# ============================================================
-
-with tabs[1]:
-
-    st.subheader("🏆 Merit Rank List")
-    st.caption(
-        "The merit list is generated automatically from stored results. "
-        "Only Rank, Anonymous ID and Merit Marks are displayed publicly."
-    )
-
-    if not OMR_DATABASE_KEY:
-        st.info(
-            "Automatic ranking is enabled without a password. Results are kept "
-            "in the app's local ranking database."
-        )
-
-    all_db = load_data()
-
-    # Every stored result is public automatically. One roll number is one record.
-    for item in all_db:
-        item["published"] = True
-
-    if all_db:
-        all_db.sort(
-            key=lambda x: (
-                -float(x.get("merit_total", 0)),
-                str(x.get("roll_no", "")).strip(),
-            )
-        )
-        for rank_idx, item in enumerate(all_db, start=1):
-            item["rank"] = rank_idx
-        save_data(all_db)
-
-    if not all_db:
-        st.info("No merit records have been generated yet.")
-    else:
-        rows = []
-        for item in all_db:
-            total = float(item.get("merit_total", 0))
-            max_marks = float(item.get("merit_max", 0))
-            rows.append({
-                "Rank": int(item.get("rank", 0)),
-                "Anonymous ID": item.get("public_id", "N/A"),
-                "Merit Marks": f"{total:.2f} / {max_marks:.2f}",
-            })
-
-        st.markdown("### 🏆 Live Merit Rank List")
-        st.dataframe(
-            pd.DataFrame(rows),
-            hide_index=True,
-            use_container_width=True,
-        )
-        st.caption(
-            "One Anonymous ID is permanently associated with one roll number. "
-            "If the same roll number is checked multiple times, only its "
-            "highest merit marks are retained for ranking. The roll number "
-            "itself is never displayed."
-        )
